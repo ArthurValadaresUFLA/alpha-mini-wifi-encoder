@@ -1,4 +1,9 @@
-"""Bluetooth Low Energy I/O: device discovery and GATT writes (via ``bleak``)."""
+"""Bluetooth Low Energy I/O: device discovery and GATT writes (via ``bleak``).
+
+This module provides the :class:`BleDevice` value type, the :class:`DeviceScanner` and
+:class:`GattWriter` protocols used by the interactive layer, and their ``bleak``-backed
+implementations :class:`BleakDeviceScanner` and :class:`BleakGattWriter`.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 _INTER_CHUNK_DELAY_SECONDS = 0.03
+"""float: Delay in seconds between consecutive GATT writes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,10 +33,10 @@ class BleDevice:
     """A Bluetooth Low Energy device seen during a scan.
 
     Attributes:
-        address: Platform address (MAC on Linux/Windows, UUID on macOS).
-        name: Advertised local name (empty if none).
-        rssi: Signal strength in dBm, if known.
-        advertises_service: Whether the Alpha Mini service UUID was advertised.
+        address (str): Platform address (MAC on Linux/Windows, UUID on macOS).
+        name (str): Advertised local name, empty if none was provided.
+        rssi (int | None): Signal strength in dBm, if known.
+        advertises_service (bool): Whether the Alpha Mini service UUID was advertised.
     """
 
     address: str
@@ -40,7 +46,12 @@ class BleDevice:
 
     @property
     def label(self) -> str:
-        """Menu label: name, address, signal and service marker."""
+        """Build a menu label from the name, address, signal and service marker.
+
+        Returns:
+            str: Label combining the advertised name, platform address, signal strength and,
+                where applicable, an ``[Alpha Mini service]`` marker.
+        """
         signal = f"{self.rssi} dBm" if self.rssi is not None else "? dBm"
         star = "  [Alpha Mini service]" if self.advertises_service else ""
         return f"{self.name or '(unnamed)'}  {self.address}  {signal}{star}"
@@ -50,7 +61,15 @@ class DeviceScanner(Protocol):
     """Strategy that discovers nearby BLE devices."""
 
     async def scan(self, timeout: float) -> list[BleDevice]:  # noqa: ASYNC109 - plain duration
-        """Scan for ``timeout`` seconds and return the devices found."""
+        """Scan for nearby BLE devices for up to ``timeout`` seconds.
+
+        Args:
+            timeout (float): Maximum duration of the scan, in seconds.
+
+        Returns:
+            list[BleDevice]: Devices discovered during the scan, in an implementation-defined
+                order.
+        """
         ...
 
 
@@ -65,23 +84,43 @@ class GattWriter(Protocol):
         listen_seconds: float = 0.0,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> tuple[bytes, ...]:
-        """Write ``chunks`` in order and return notifications received afterwards."""
+        """Write all ``chunks`` to a device in order and return later notifications.
+
+        Args:
+            address (str): Platform address of the target device.
+            chunks (Sequence[bytes]): GATT write values to send, in order.
+            listen_seconds (float): Seconds to keep listening for notifications after writing.
+            on_progress (Callable[[int, int], None] | None): Optional callback invoked after each
+                write with the number of chunks written and the total number of chunks.
+
+        Returns:
+            tuple[bytes, ...]: Notifications received after the writes, in arrival order.
+        """
         ...
 
 
 class BleakDeviceScanner:
-    """:class:`DeviceScanner` backed by :class:`bleak.BleakScanner`."""
+    """Concrete :class:`DeviceScanner` backed by :class:`bleak.BleakScanner`."""
 
     def __init__(self, *, include_unnamed: bool = False) -> None:
         """Create the scanner.
 
         Args:
-            include_unnamed: Keep devices that advertise no name.
+            include_unnamed (bool): Keep devices that advertise no local name.
+
+        Returns:
+            None: This method does not return a value.
         """
         self._include_unnamed = include_unnamed
 
     async def scan(self, timeout: float) -> list[BleDevice]:  # noqa: ASYNC109 - plain duration
-        """Scan and return devices sorted by (service advertised, signal strength).
+        """Scan for devices and order them by service advertisement and signal strength.
+
+        Args:
+            timeout (float): Maximum duration of the scan, in seconds.
+
+        Returns:
+            list[BleDevice]: Named devices, with service-advertising and stronger devices first.
 
         Raises:
             BleError: If the Bluetooth adapter is unavailable or the scan fails.
@@ -107,11 +146,12 @@ class BleakDeviceScanner:
 
 @dataclass
 class BleakGattWriter:
-    """:class:`GattWriter` backed by :class:`bleak.BleakClient`.
+    """Concrete :class:`GattWriter` backed by :class:`bleak.BleakClient`.
 
     Attributes:
-        connect_timeout: Seconds allowed for the connection.
-        client_factory: Callable creating a client from an address (injectable).
+        connect_timeout (float): Seconds allowed for the connection.
+        client_factory (Callable[..., Any]): Callable creating a client from an address
+            (injectable for tests).
     """
 
     connect_timeout: float = 15.0
@@ -128,13 +168,14 @@ class BleakGattWriter:
         """Connect, write every chunk to the write characteristic, then listen.
 
         Args:
-            address: Device address from a scan.
-            chunks: GATT write values, in order.
-            listen_seconds: How long to collect notifications after writing.
-            on_progress: Called with ``(written, total)`` after each write.
+            address (str): Platform address of the target device.
+            chunks (Sequence[bytes]): GATT write values to send, in order.
+            listen_seconds (float): Seconds to keep listening for notifications after writing.
+            on_progress (Callable[[int, int], None] | None): Optional callback invoked after each
+                write with the number of chunks written and the total number of chunks.
 
         Returns:
-            Notifications received on the notify characteristic.
+            tuple[bytes, ...]: Notifications received on the notify characteristic.
 
         Raises:
             BleError: On connection, timeout or write failure.
@@ -158,7 +199,15 @@ class BleakGattWriter:
 
     @staticmethod
     async def _subscribe(client: Any, sink: list[bytes]) -> None:  # noqa: ANN401
-        """Subscribe to notifications; a missing characteristic is not fatal."""
+        """Subscribe to notifications, treating a missing characteristic as non-fatal.
+
+        Args:
+            client (Any): Connected ``bleak`` client exposing ``start_notify``.
+            sink (list[bytes]): Mutable list that receives the notification payloads.
+
+        Returns:
+            None: This method does not return a value.
+        """
         try:
             await client.start_notify(
                 NOTIFY_CHARACTERISTIC_UUID,

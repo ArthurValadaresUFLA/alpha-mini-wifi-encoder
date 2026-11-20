@@ -1,9 +1,16 @@
 """Best-effort decoding of the robot's notifications.
 
+Malformed frames and bodies are skipped rather than raised, so a decode may yield fewer
+responses than there were notifications.
+
 Assumptions (inferred from the analysis report, not confirmed on hardware):
 notifications reuse the ``MiniBleProto`` frame, may carry the same 4-byte
 ``randomId``/``serialNo`` trailer per fragment, and the response body is a
 ``BindOrSwitchWifiResponse`` whose field 1 is a JSON string with ``co``/``ec``.
+
+The module exports :class:`WifiResponse`, the decoded response value type, and
+:func:`decode_notifications`, which tries both the trailer and raw fragment layouts and keeps
+the interpretation that yields the most responses.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
 ERROR_COMMAND = -1
+"""int: JSON ``co`` value that indicates a robot-reported error."""
 
 RESPONSE_MEANINGS: dict[int, str] = {
     101: "Wi-Fi list",
@@ -35,16 +43,17 @@ RESPONSE_MEANINGS: dict[int, str] = {
     110: "Wi-Fi scan stopped",
     111: "Code challenge",
 }
+"""dict[int, str]: Human-readable meanings for known ``co`` values."""
 
 
 @dataclass(frozen=True, slots=True)
 class WifiResponse:
-    """One decoded response.
+    """A single decoded response from the robot.
 
     Attributes:
-        json_text: Raw JSON string of the response body.
-        command: ``co`` value, if present.
-        error_code: ``ec`` value, if present.
+        json_text (str): Raw JSON string of the response body.
+        command (int | None): ``co`` value from the JSON body, if present.
+        error_code (int | None): ``ec`` value from the JSON body, if present.
     """
 
     json_text: str
@@ -53,11 +62,19 @@ class WifiResponse:
 
     @property
     def is_error(self) -> bool:
-        """Whether the robot reported an error (``co`` = -1)."""
+        """Report whether the robot signalled an error (``co`` = -1).
+
+        Returns:
+            bool: True when ``command`` equals :data:`ERROR_COMMAND`, otherwise False.
+        """
         return self.command == ERROR_COMMAND
 
     def describe(self) -> str:
-        """Return a short human-readable description."""
+        """Return a short human-readable description of the response.
+
+        Returns:
+            str: Known meaning or ``Unrecognised response``, with the ``co`` or ``ec`` value.
+        """
         if self.is_error:
             return f"Error reported by the robot (ec={self.error_code})"
         meaning = RESPONSE_MEANINGS.get(self.command, "Unknown response") if self.command else None
@@ -65,7 +82,14 @@ class WifiResponse:
 
 
 def _iter_frames(data: bytes) -> Iterator[bytes]:
-    """Yield every valid frame found in ``data`` (tolerates leading garbage)."""
+    """Yield every valid frame found in ``data``, tolerating leading garbage.
+
+    Args:
+        data (bytes): Raw byte stream in which to look for frames.
+
+    Yields:
+        bytes: A complete ``MiniBleProto`` frame that passes validation.
+    """
     position = data.find(FRAME_MAGIC)
     while position != -1 and position + 5 <= len(data):
         length = int.from_bytes(data[position + 3 : position + 5], "big")
@@ -80,6 +104,14 @@ def _iter_frames(data: bytes) -> Iterator[bytes]:
 
 
 def _parse_body(frame: bytes) -> WifiResponse | None:
+    """Parse the JSON response body carried by a validated frame.
+
+    Args:
+        frame (bytes): Complete ``MiniBleProto`` frame to decode.
+
+    Returns:
+        WifiResponse | None: Decoded response, or None if the frame or body cannot be parsed.
+    """
     try:
         message = EnvelopeMessage.FromString(unpack_frame(frame))
         body = BindOrSwitchWifiResponse.FromString(message.bodyData)  # type: ignore[attr-defined]
@@ -106,10 +138,10 @@ def decode_notifications(notifications: Sequence[bytes]) -> tuple[WifiResponse, 
     trailer layout.
 
     Args:
-        notifications: Raw GATT notification values, in arrival order.
+        notifications (Sequence[bytes]): Raw GATT notification values, in arrival order.
 
     Returns:
-        Every response that could be decoded (possibly empty).
+        tuple[WifiResponse, ...]: Every response that could be decoded (possibly empty).
     """
     best: tuple[WifiResponse, ...] = ()
     for strip in (True, False):

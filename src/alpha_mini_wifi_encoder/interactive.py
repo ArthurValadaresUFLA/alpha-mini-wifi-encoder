@@ -1,4 +1,11 @@
-"""Arrow-key terminal menus (``questionary``) behind a small, testable interface."""
+"""Arrow-key terminal menus (``questionary``) behind a small, testable interface.
+
+Terminal interaction is isolated behind the :class:`Prompter` protocol so that callers can be
+tested with a fake prompter. :class:`QuestionaryPrompter` is the ``questionary`` implementation,
+:class:`NetworkChoice` is the selected-network value type, and :func:`select_device`,
+:func:`select_security`, :func:`select_network` and :func:`ask_network_password` compose the
+interactive workflow.
+"""
 
 from __future__ import annotations
 
@@ -20,30 +27,75 @@ if TYPE_CHECKING:
 
 
 class Prompter(Protocol):
-    """Interactive prompts (Adapter over a prompt library)."""
+    """Protocol for interactive prompts, acting as an adapter over a prompt library."""
 
     def select[T](self, message: str, choices: Sequence[tuple[str, T]]) -> T:
-        """Let the user pick one of ``choices`` (label, value) with the arrow keys."""
+        """Let the user pick one of ``choices`` using the arrow keys.
+
+        Args:
+            message (str): Prompt text shown above the choices.
+            choices (Sequence[tuple[str, T]]): Labelled values offered to the user.
+
+        Returns:
+            T: Value associated with the selected label.
+
+        Raises:
+            UserAbortedError: If the user cancels the prompt.
+        """
         ...
 
     def text(self, message: str) -> str:
-        """Ask for a line of text."""
+        """Ask for a line of text.
+
+        Args:
+            message (str): Prompt text shown to the user.
+
+        Returns:
+            str: The entered line, stripped of surrounding whitespace.
+
+        Raises:
+            UserAbortedError: If the user cancels the prompt.
+        """
         ...
 
     def password(self, message: str) -> str:
-        """Ask for a hidden line of text (never echoed, never stored)."""
+        """Ask for a hidden line of text that is never echoed or stored.
+
+        Args:
+            message (str): Prompt text shown to the user.
+
+        Returns:
+            str: The entered secret, without surrounding whitespace being stripped.
+
+        Raises:
+            UserAbortedError: If the user cancels the prompt.
+        """
         ...
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
-        """Ask a yes/no question."""
+        """Ask a yes/no question.
+
+        Args:
+            message (str): Prompt text shown to the user.
+            default (bool): Answer selected when the user presses Enter without a choice.
+
+        Returns:
+            bool: True for a yes answer, False for a no answer.
+
+        Raises:
+            UserAbortedError: If the user cancels the prompt.
+        """
         ...
 
 
 class QuestionaryPrompter:
-    """:class:`Prompter` implemented with ``questionary`` (up/down arrows, Enter)."""
+    """Concrete :class:`Prompter` implemented with ``questionary`` (up/down arrows, Enter)."""
 
     def __init__(self) -> None:
         """Create the prompter.
+
+        Returns:
+            None: This method does not return a value.
 
         Raises:
             EncoderError: If stdin/stdout is not an interactive terminal.
@@ -53,7 +105,18 @@ class QuestionaryPrompter:
             raise EncoderError(msg)
 
     def select[T](self, message: str, choices: Sequence[tuple[str, T]]) -> T:
-        """Show an arrow-key menu; Ctrl-C raises :class:`UserAbortedError`."""
+        """Show an arrow-key menu and return the selected value.
+
+        Args:
+            message (str): Prompt text shown above the choices.
+            choices (Sequence[tuple[str, T]]): Labelled values offered to the user.
+
+        Returns:
+            T: Value associated with the selected label.
+
+        Raises:
+            UserAbortedError: If the user cancels the prompt, for example with Ctrl-C.
+        """
         items = [
             questionary.Choice(title=label, value=index) for index, (label, _) in enumerate(choices)
         ]
@@ -64,21 +127,52 @@ class QuestionaryPrompter:
         return choices[index][1]
 
     def text(self, message: str) -> str:
-        """Ask for text; Ctrl-C raises :class:`UserAbortedError`."""
+        """Ask for text and return the stripped answer.
+
+        Args:
+            message (str): Prompt text shown to the user.
+
+        Returns:
+            str: The entered line, stripped of surrounding whitespace.
+
+        Raises:
+            UserAbortedError: If the user cancels the prompt, for example with Ctrl-C.
+        """
         answer = questionary.text(message).ask()
         if answer is None:
             raise UserAbortedError
         return str(answer).strip()
 
     def password(self, message: str) -> str:
-        """Ask for a hidden value; Ctrl-C raises :class:`UserAbortedError`."""
+        """Ask for a hidden value and return it verbatim.
+
+        Args:
+            message (str): Prompt text shown to the user.
+
+        Returns:
+            str: The entered secret, with no whitespace stripping applied.
+
+        Raises:
+            UserAbortedError: If the user cancels the prompt, for example with Ctrl-C.
+        """
         answer = questionary.password(message).ask()
         if answer is None:
             raise UserAbortedError
         return str(answer)
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
-        """Ask yes/no; Ctrl-C raises :class:`UserAbortedError`."""
+        """Ask a yes/no question and return the user's answer.
+
+        Args:
+            message (str): Prompt text shown to the user.
+            default (bool): Answer selected when the user presses Enter without a choice.
+
+        Returns:
+            bool: True for a yes answer, False for a no answer.
+
+        Raises:
+            UserAbortedError: If the user cancels the prompt, for example with Ctrl-C.
+        """
         answer = questionary.confirm(message, default=default).ask()
         if answer is None:
             raise UserAbortedError
@@ -87,12 +181,12 @@ class QuestionaryPrompter:
 
 @dataclass(frozen=True, slots=True)
 class NetworkChoice:
-    """Network picked in the menu (the password is asked separately).
+    """Network picked in the menu; the password is asked for separately.
 
     Attributes:
-        ssid: Network name.
-        security: Security mode.
-        bssid: Access-point address, when known.
+        ssid (str): Network name.
+        security (Security): Security mode.
+        bssid (str | None): Access-point address, when known.
     """
 
     ssid: str
@@ -106,23 +200,27 @@ _SECURITY_MENU: tuple[tuple[str, Security], ...] = (
     ("WEP", Security.WEP),
     ("Open (no password)", Security.OPEN),
 )
+"""tuple[tuple[str, Security], ...]: Labels and values offered by the security menu."""
 _OTHER = object()
+"""object: Sentinel value for the manual network entry option."""
 _RESCAN = object()
+"""object: Sentinel value for the rescan option."""
 _CANCEL = object()
+"""object: Sentinel value for the cancel option."""
 
 
 def select_device(
     prompter: Prompter,
     scan: Callable[[], list[BleDevice]],
 ) -> BleDevice:
-    """Scan and let the user pick a device; offers a rescan option.
+    """Scan for devices and let the user pick one, offering a rescan option.
 
     Args:
-        prompter: Prompt implementation.
-        scan: Callable performing a scan and returning the devices.
+        prompter (Prompter): Prompt implementation.
+        scan (Callable[[], list[BleDevice]]): Callable performing a scan and returning the devices.
 
     Returns:
-        The selected device.
+        BleDevice: The selected device.
 
     Raises:
         UserAbortedError: If the user cancels.
@@ -141,6 +239,17 @@ def select_device(
 
 
 def _as_device(value: object) -> BleDevice:
+    """Validate and return a device selected from the menu.
+
+    Args:
+        value (object): Value returned by the device selection menu.
+
+    Returns:
+        BleDevice: The validated device.
+
+    Raises:
+        BleError: If ``value`` is not a :class:`BleDevice`.
+    """
     from alpha_mini_wifi_encoder.ble import BleDevice  # noqa: PLC0415
 
     if not isinstance(value, BleDevice):  # pragma: no cover - guarded by menu construction
@@ -149,7 +258,17 @@ def _as_device(value: object) -> BleDevice:
 
 
 def select_security(prompter: Prompter) -> Security:
-    """Ask for the security mode of a network."""
+    """Ask for the security mode of a network.
+
+    Args:
+        prompter (Prompter): Prompt implementation.
+
+    Returns:
+        Security: The selected security mode.
+
+    Raises:
+        UserAbortedError: If the user cancels the prompt.
+    """
     return prompter.select("Security of the network", _SECURITY_MENU)
 
 
@@ -158,15 +277,18 @@ def select_network(
     detector: WifiDetector | None,
     saved: SavedNetworkProvider | None,
 ) -> NetworkChoice:
-    """Menu with the current network, saved networks and a manual entry option.
+    """Show a menu with the current, saved and manually entered networks.
 
     Args:
-        prompter: Prompt implementation.
-        detector: Detects the network this machine is connected to (optional).
-        saved: Lists networks already configured on this machine (optional).
+        prompter (Prompter): Prompt implementation.
+        detector (WifiDetector | None): Detects the network this machine is connected to, if any.
+        saved (SavedNetworkProvider | None): Lists networks already configured on this machine.
 
     Returns:
-        The chosen network. Passwords are not handled here and never stored.
+        NetworkChoice: The chosen network. Passwords are not handled here and never stored.
+
+    Raises:
+        UserAbortedError: If the user cancels the prompt.
     """
     choices: list[tuple[str, object]] = []
     current_ssid: str | None = None
@@ -203,14 +325,17 @@ def select_network(
 
 
 def ask_network_password(prompter: Prompter, choice: NetworkChoice) -> str:
-    """Ask for the network password (hidden); open networks need none.
+    """Ask for the network password with the input hidden; open networks need none.
 
     Args:
-        prompter: Prompt implementation.
-        choice: The selected network.
+        prompter (Prompter): Prompt implementation.
+        choice (NetworkChoice): The selected network.
 
     Returns:
-        The password, or ``""`` for open networks. It is kept in memory only.
+        str: The password, or ``""`` for open networks. It is kept in memory only.
+
+    Raises:
+        UserAbortedError: If the user cancels the prompt.
     """
     if choice.security is Security.OPEN:
         return ""
