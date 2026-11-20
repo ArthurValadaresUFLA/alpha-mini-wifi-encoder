@@ -1,4 +1,9 @@
-"""Splitting a frame into GATT writes (``MiniBleProto.devide``)."""
+"""Splitting a frame into GATT writes (``MiniBleProto.devide``).
+
+:class:`ChunkingStrategy` declares the interface used by the encoder, and
+:class:`TrailerChunker` implements the app's scheme of 16-byte frame slices
+followed by a two-byte random id and a two-byte serial number.
+"""
 
 from __future__ import annotations
 
@@ -11,13 +16,21 @@ if TYPE_CHECKING:
     from alpha_mini_wifi_encoder.ids import RandomIdProvider
 
 _MAX_CHUNKS = 0xFFFF
+"""int: Largest chunk count representable by the 16-bit serial number."""
 
 
 class ChunkingStrategy(Protocol):
     """Strategy turning a frame into the list of GATT write values."""
 
     def split(self, frame: bytes) -> tuple[bytes, ...]:
-        """Split ``frame`` into write values."""
+        """Split ``frame`` into write values.
+
+        Args:
+            frame (bytes): Complete frame to split.
+
+        Returns:
+            tuple[bytes, ...]: Ordered values for the GATT write requests.
+        """
         ...
 
 
@@ -32,8 +45,11 @@ class TrailerChunker:
         """Create the chunker.
 
         Args:
-            random_ids: Provider of the per-message random id.
-            chunk_size: Frame bytes per write.
+            random_ids (RandomIdProvider): Provider of the per-message random id.
+            chunk_size (int): Frame bytes per write.
+
+        Returns:
+            None: This function does not return a value.
 
         Raises:
             ValueError: If ``chunk_size`` is not positive.
@@ -46,6 +62,12 @@ class TrailerChunker:
 
     def split(self, frame: bytes) -> tuple[bytes, ...]:
         """Split ``frame``; the random id is drawn once per message.
+
+        Args:
+            frame (bytes): Complete frame to split.
+
+        Returns:
+            tuple[bytes, ...]: Frame slices, each with a random id and a serial number.
 
         Raises:
             PayloadTooLargeError: If the serial number would overflow 16 bits.

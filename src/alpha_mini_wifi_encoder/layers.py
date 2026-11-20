@@ -1,4 +1,11 @@
-"""Encoding layers and the pipeline that chains them (Pipeline / Chain pattern)."""
+"""Encoding layers and the pipeline that chains them (Pipeline / Chain pattern).
+
+:class:`EncodingLayer` defines the wrapping interface, :class:`LayerOutput` records each
+intermediate result, and :class:`EncodingPipeline` applies layers in order. The concrete
+layers (:class:`BindOrSwitchWifiLayer`, :class:`MessageLayer` and :class:`FrameLayer`) mirror the
+protobuf, envelope and framing steps of the companion app. :func:`unpack_frame` validates the
+resulting single frame.
+"""
 
 from __future__ import annotations
 
@@ -33,7 +40,14 @@ class EncodingLayer(Protocol):
     name: str
 
     def encode(self, payload: bytes) -> bytes:
-        """Wrap ``payload`` and return the bytes handed to the next layer."""
+        """Wrap ``payload`` and return the bytes handed to the next layer.
+
+        Args:
+            payload (bytes): Bytes produced by the previous layer.
+
+        Returns:
+            bytes: Wrapped bytes to pass to the next layer.
+        """
         ...
 
 
@@ -42,8 +56,8 @@ class LayerOutput:
     """Bytes produced by one layer, kept for inspection.
 
     Attributes:
-        name: Human-readable layer name.
-        data: Output of the layer.
+        name (str): Human-readable layer name.
+        data (bytes): Output of the layer.
     """
 
     name: str
@@ -59,12 +73,22 @@ class BindOrSwitchWifiLayer:
         """Create the layer.
 
         Args:
-            version_code: Value of ``versionCode`` (``168`` in the app).
+            version_code (int): Value of ``versionCode`` (``168`` in the app).
+
+        Returns:
+            None: This function does not return a value.
         """
         self._version_code = version_code
 
     def encode(self, payload: bytes) -> bytes:
-        """Wrap UTF-8 JSON ``payload``."""
+        """Wrap UTF-8 JSON ``payload``.
+
+        Args:
+            payload (bytes): UTF-8 encoded JSON document.
+
+        Returns:
+            bytes: Serialised ``BindOrSwitchWifiRequest`` message.
+        """
         request = BindOrSwitchWifiRequest(data=payload.decode(), versionCode=self._version_code)
         return request.SerializeToString(deterministic=True)
 
@@ -83,9 +107,12 @@ class MessageLayer:
         """Create the layer.
 
         Args:
-            send_serial: Per-session monotonic counter (starts at 1 in the app).
-            command_id: ``MessageHeader.commandId``.
-            header_version: ``MessageHeader.versionCode``.
+            send_serial (int): Per-session monotonic counter (starts at 1 in the app).
+            command_id (int): ``MessageHeader.commandId``.
+            header_version (int): ``MessageHeader.versionCode``.
+
+        Returns:
+            None: This function does not return a value.
 
         Raises:
             ValueError: If ``send_serial`` is outside ``[0, MAX_SEND_SERIAL]``.
@@ -98,7 +125,14 @@ class MessageLayer:
         self._header_version = header_version
 
     def encode(self, payload: bytes) -> bytes:
-        """Wrap the layer-1 bytes as ``bodyData``."""
+        """Wrap the layer-1 bytes as ``bodyData``.
+
+        Args:
+            payload (bytes): Serialised layer-1 message.
+
+        Returns:
+            bytes: Serialised envelope with header and body data.
+        """
         header = MessageHeader(
             commandId=self._command_id,
             sendSerial=self._send_serial,
@@ -118,6 +152,12 @@ class FrameLayer:
 
         The length field holds the index of the final ``0xED`` byte, i.e.
         ``len(payload) + 6`` (total frame size minus one).
+
+        Args:
+            payload (bytes): Envelope bytes to wrap in a frame.
+
+        Returns:
+            bytes: Complete single-frame ``MiniBleProto`` container.
 
         Raises:
             PayloadTooLargeError: If the length no longer fits in 16 bits.
@@ -139,10 +179,10 @@ def unpack_frame(frame: bytes) -> bytes:
     """Validate a single frame like ``MiniBleProto.unpack`` and return its content.
 
     Args:
-        frame: Complete frame, ``FB BF 01 <len BE> <content> 01 ED``.
+        frame (bytes): Complete frame, ``FB BF 01 <len BE> <content> 01 ED``.
 
     Returns:
-        The content between the length field and the tail.
+        bytes: The content between the length field and the tail.
 
     Raises:
         FrameError: If the magic, type, length or terminator is invalid.
@@ -164,7 +204,10 @@ class EncodingPipeline:
         """Create the pipeline.
 
         Args:
-            layers: Layers in application order (innermost first).
+            layers (Sequence[EncodingLayer]): Layers in application order (innermost first).
+
+        Returns:
+            None: This function does not return a value.
         """
         self._layers = tuple(layers)
 
@@ -172,10 +215,10 @@ class EncodingPipeline:
         """Apply every layer and return each intermediate output.
 
         Args:
-            payload: Input of the first layer.
+            payload (bytes): Input of the first layer.
 
         Returns:
-            One :class:`LayerOutput` per layer; the last one is the final frame.
+            tuple[LayerOutput, ...]: One output per layer; the last is the final frame.
         """
         outputs: list[LayerOutput] = []
         current = payload

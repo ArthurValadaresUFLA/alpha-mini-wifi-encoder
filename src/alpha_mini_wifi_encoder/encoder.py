@@ -1,4 +1,10 @@
-"""High-level facade that encodes a Wi-Fi provisioning request offline."""
+"""High-level facade that encodes a Wi-Fi provisioning request offline.
+
+:class:`WifiProvisioningEncoder` composes JSON serialisation, the encoding layers and GATT
+chunking into a single call. :class:`EncodedProvisioning` collects the JSON text, every
+intermediate layer output, the final frame and the write values. The facade performs no BLE
+input or output.
+"""
 
 from __future__ import annotations
 
@@ -28,10 +34,10 @@ class EncodedProvisioning:
     """Result of an encoding run.
 
     Attributes:
-        json_text: Inner JSON document.
-        layers: Output of every layer, innermost first.
-        frame: Final ``MiniBleProto`` frame (last layer output).
-        chunks: GATT write values (frame slices plus trailers).
+        json_text (str): Inner JSON document.
+        layers (tuple[LayerOutput, ...]): Output of every layer, innermost first.
+        frame (bytes): Final ``MiniBleProto`` frame (last layer output).
+        chunks (tuple[bytes, ...]): GATT write values (frame slices plus trailers).
     """
 
     json_text: str
@@ -47,8 +53,11 @@ class WifiProvisioningEncoder:
         """Create the encoder from explicit strategies (dependency injection).
 
         Args:
-            serializer: JSON serialisation strategy.
-            chunker: GATT chunking strategy.
+            serializer (PayloadSerializer): JSON serialisation strategy.
+            chunker (ChunkingStrategy): GATT chunking strategy.
+
+        Returns:
+            None: This function does not return a value.
         """
         self._serializer = serializer
         self._chunker = chunker
@@ -58,10 +67,11 @@ class WifiProvisioningEncoder:
         """Build an encoder matching the app: Gson-compatible JSON, 16-byte chunks.
 
         Args:
-            random_ids: Random-id provider; defaults to the fixed id ``0x1234``.
+            random_ids (RandomIdProvider | None): Random-id provider; defaults to the fixed
+                id ``0x1234``.
 
         Returns:
-            A ready-to-use encoder.
+            WifiProvisioningEncoder: A ready-to-use encoder.
         """
         return cls(GsonCompatSerializer(), TrailerChunker(random_ids or FixedRandomId()))
 
@@ -75,12 +85,12 @@ class WifiProvisioningEncoder:
         """Encode ``credentials`` into a frame and GATT chunks.
 
         Args:
-            credentials: Validated network description.
-            command: ``co`` value (bind or change Wi-Fi).
-            send_serial: Header ``sendSerial`` (1 for the first request).
+            credentials (WifiCredentials): Validated network description.
+            command (WifiCommand): ``co`` value (bind or change Wi-Fi).
+            send_serial (int): Header ``sendSerial`` (1 for the first request).
 
         Returns:
-            Every intermediate and final artefact of the encoding.
+            EncodedProvisioning: Every intermediate and final artefact of the encoding.
         """
         payload = WifiPayload.from_credentials(credentials, command)
         json_text = self._serializer.serialize(payload)
