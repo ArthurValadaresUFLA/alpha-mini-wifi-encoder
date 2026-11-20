@@ -16,7 +16,7 @@ from alpha_mini_wifi_encoder.constants import (
     MAX_FRAME_LENGTH_FIELD,
     MAX_SEND_SERIAL,
 )
-from alpha_mini_wifi_encoder.errors import PayloadTooLargeError
+from alpha_mini_wifi_encoder.errors import FrameError, PayloadTooLargeError
 from alpha_mini_wifi_encoder.protobuf_messages import (
     BindOrSwitchWifiRequest,
     EnvelopeMessage,
@@ -133,6 +133,28 @@ class FrameLayer:
             + payload
             + FRAME_TAIL
         )
+
+
+def unpack_frame(frame: bytes) -> bytes:
+    """Validate a single frame like ``MiniBleProto.unpack`` and return its content.
+
+    Args:
+        frame: Complete frame, ``FB BF 01 <len BE> <content> 01 ED``.
+
+    Returns:
+        The content between the length field and the tail.
+
+    Raises:
+        FrameError: If the magic, type, length or terminator is invalid.
+    """
+    if len(frame) < FRAME_OVERHEAD or frame[:2] != FRAME_MAGIC or frame[2] != FRAME_TYPE_SINGLE:
+        msg = "not a MiniBleProto single frame"
+        raise FrameError(msg)
+    length = int.from_bytes(frame[3:5], "big")
+    if length != len(frame) - 1 or frame[length] != FRAME_TAIL[-1]:
+        msg = "inconsistent frame length or missing terminator"
+        raise FrameError(msg)
+    return frame[5 : length - 1]
 
 
 class EncodingPipeline:
