@@ -57,6 +57,10 @@ def _build_file() -> descriptor_pb2.FileDescriptorProto:
     _add_field(header, "versionCode", 4, _Field.TYPE_INT32)
     _add_field(header, "msgType", 5, _Field.TYPE_INT32)
 
+    response = proto.message_type.add()
+    response.name = "BindOrSwitchWifiResponse"
+    _add_field(response, "data", 1, _Field.TYPE_STRING)
+
     message = proto.message_type.add()
     message.name = "Message"
     _add_field(message, "header", 1, _Field.TYPE_MESSAGE, f".{_PACKAGE}.MessageHeader")
@@ -80,3 +84,6 @@ MessageHeader: type[Message] = _message_class("MessageHeader")
 
 EnvelopeMessage: type[Message] = _message_class("Message")
 """Layer 3: ``{header: MessageHeader, bodyData: bytes}``."""
+
+BindOrSwitchWifiResponse: type[Message] = _message_class("BindOrSwitchWifiResponse")
+"""Response body: ``{data: string}`` (field layout inferred from the report)."""
