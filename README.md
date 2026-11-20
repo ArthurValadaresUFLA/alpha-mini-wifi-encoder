@@ -1,34 +1,63 @@
 # alpha-mini-wifi-encoder
 
-Offline encoder for the **UBTECH Alpha Mini** BLE Wi-Fi provisioning payload.
-It reproduces, byte for byte, the frames the companion app would write to the
-robot's GATT write characteristic. **It performs no BLE I/O** and never talks to a device.
+Encoder and BLE sender for the **UBTECH Alpha Mini** Wi-Fi provisioning payload.
+It reproduces, byte for byte, the frames the companion app writes to the robot's GATT write
+characteristic. Only `send` and `scan` touch Bluetooth; `encode` is fully offline.
 
 ## Install and run
 
 ```bash
 uv sync
-uv run alpha-mini-wifi-encode --cap '[WPA-PSK-CCMP][WPA2-PSK-CCMP][ESS]' \
-  --ssid MyWiFi --pwd password123 --bssid aa:bb:cc:dd:ee:ff --dont-ping 0 --layers
+uv run alpha-mini-wifi-encode --help
 ```
 
-Options: `--change-wifi` (`co=2`), `--send-serial`, `--random-id` / `--randomize`,
-`--json-style gson|compact`, `--output pretty|json`. The password may be given via
-`ALPHA_MINI_WIFI_PASSWORD` to keep it out of shell history.
+Commands:
 
-### Use the Wi-Fi network this machine is connected to
+| Command | What it does |
+|---|---|
+| `encode` | Offline: prints the JSON, frame and GATT writes. No I/O. |
+| `scan` | Lists nearby BLE devices. |
+| `send` | Encodes the payload and **writes it to the robot over BLE**. |
+
+### Sending to the robot (interactive)
 
 ```bash
-uv run alpha-mini-wifi-encode --current-network            # asks for the password (hidden)
-uv run alpha-mini-wifi-encode --current-network --include-bssid --layers
+uv run alpha-mini-wifi-encode send            # menus for robot and network
+uv run alpha-mini-wifi-encode send -i         # force menus even if flags are given
 ```
 
-SSID and security are detected (Linux: `nmcli`; Windows: `netsh`; macOS: `system_profiler`,
-best effort, may need Location Services permission). Security is mapped to the app's values
-`WPA`, `WPA2`, `WEP`, `N` (open; unconfirmed on hardware); WPA3-only and enterprise networks are
-rejected. The BSSID is omitted unless `--include-bssid` is given, like the app's native flow.
-`--ssid`, `--cap` and `--bssid` override detected values. **The password is never read from the
-OS**: pass `--pwd`, `ALPHA_MINI_WIFI_PASSWORD`, or type it at the prompt.
+When `--device` or the network flags (`--ssid` and `--cap`, or `--current-network`) are missing,
+`send` opens arrow-key menus (up/down, Enter, Ctrl-C to cancel):
+
+1. **Network**: the network this machine is connected to, networks already configured on it
+   (Linux `nmcli`, Windows `netsh`, macOS `networksetup`), or *Enter another network...* (SSID +
+   security). The password is always typed in a hidden prompt (or `--pwd` /
+   `ALPHA_MINI_WIFI_PASSWORD`); it is **never read from the OS and never written to disk**.
+2. **Purpose**: bind a new robot (`co=21`) or change Wi-Fi of a bound one (`co=2`).
+3. **Robot**: BLE scan results, devices advertising the Alpha Mini service first; *Rescan* available.
+4. **Confirmation** before anything is written.
+
+Non-interactive example (no terminal needed):
+
+```bash
+ALPHA_MINI_WIFI_PASSWORD=... uv run alpha-mini-wifi-encode send \
+  --ssid MyWiFi --cap WPA2 --device AA:BB:CC:DD:EE:FF --yes
+```
+
+`--dry-run` shows the bytes without connecting (they contain the password). After writing, the
+tool listens for `--listen` seconds and decodes the robot's replies (best effort: the response
+layout is inferred from the analysis report and not confirmed on hardware).
+
+### Current network / encode options
+
+```bash
+uv run alpha-mini-wifi-encode encode --current-network --include-bssid --layers
+```
+
+SSID and security of the current network are detected and mapped to the app's values `WPA`,
+`WPA2`, `WEP`, `N` (open; unconfirmed on hardware); WPA3-only and enterprise networks are rejected.
+The BSSID is omitted unless `--include-bssid` is given, like the app's native flow. `--ssid`,
+`--cap` and `--bssid` override detected values.
 
 ## Wire format (summary)
 
@@ -51,7 +80,11 @@ OS**: pass `--pwd`, `ALPHA_MINI_WIFI_PASSWORD`, or type it at the prompt.
 | `chunking` | `TrailerChunker` | Strategy |
 | `encoder` | `WifiProvisioningEncoder` (+ `with_defaults`) | Facade, Factory method, DI |
 | `network` | `NmcliDetector`, `NetshDetector`, `SystemProfilerDetector`, `create_detector` | Strategy, Factory |
-| `cli` | click + rich front end | - |
+| `saved_networks` | Saved-network providers per OS | Strategy, Factory |
+| `ble` | `BleakDeviceScanner`, `BleakGattWriter` (bleak) | Strategy, Adapter |
+| `interactive` | `Prompter` over questionary, menu flows | Adapter |
+| `responses` | Best-effort decoding of robot notifications | - |
+| `cli` | click + rich front end (`encode`, `scan`, `send`) | - |
 
 Protobuf encoding uses the official `protobuf` runtime (messages declared via a
 descriptor, no hand-written varints).

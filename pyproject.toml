@@ -1,7 +1,7 @@
 [project]
 name = "alpha-mini-wifi-encoder"
 version = "0.1.0"
-description = "Offline encoder for the UBTECH Alpha Mini BLE Wi-Fi provisioning payload (no BLE I/O)."
+description = "Encoder and BLE sender for the UBTECH Alpha Mini Wi-Fi provisioning payload."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
