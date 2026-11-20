@@ -145,3 +145,14 @@ def test_to_credentials_bssid_toggle() -> None:
     net = NmcliDetector(fake("yes:S:AA\\:BB\\:CC\\:DD\\:EE\\:FF:WPA2\n")).detect()
     assert net.to_credentials(password="p").bssid is None
     assert net.to_credentials(password="p", include_bssid=True).bssid == "aa:bb:cc:dd:ee:ff"
+
+
+def test_run_command_forces_untranslated_locale(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LC_ALL", "pt_BR.UTF-8")
+    code = "import os; print(os.environ['LC_ALL'], os.environ['LANG'])"
+    assert run_command([sys.executable, "-c", code]).split() == ["C.UTF-8", "C.UTF-8"]
+
+
+def test_not_connected_message_has_a_hint() -> None:
+    with pytest.raises(NetworkDetectionError, match=r"nmcli -t -f ACTIVE"):
+        NmcliDetector(fake("")).detect()

@@ -8,6 +8,7 @@ it must be supplied by the user.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import subprocess
@@ -23,8 +24,9 @@ CommandRunner = Callable[[Sequence[str]], str]
 """Callable that executes a command and returns its standard output."""
 
 _COMMAND_TIMEOUT_SECONDS = 10
+_UNTRANSLATED_LOCALE = "C.UTF-8"
 _SECURITY_TOKENS = re.compile(r"WPA3|WPA2|WPA1|WPA|WEP|ENTERPRISE|802\.1X|NONE|OPEN|ABERTA|--")
-_WINDOWS_AUTH_VALUE = re.compile(r"^(?:OPEN|ABERTA|WEP|WPA\d?(?:-.+)?)$")
+WINDOWS_AUTH_VALUE = re.compile(r"^(?:OPEN|ABERTA|WEP|WPA\d?(?:-.+)?)$")
 _REDACTED = "<redacted>"
 
 
@@ -124,9 +126,13 @@ def classify_security(raw: str) -> Security:
 def run_command(args: Sequence[str]) -> str:
     """Run ``args`` without a shell and return its standard output.
 
+    The child runs with an untranslated locale: tools such as ``nmcli`` translate
+    their output (``yes`` becomes ``sim`` in pt_BR), which would break parsing.
+
     Raises:
         NetworkDetectionError: If the command is missing, fails or times out.
     """
+    environment = {**os.environ, "LC_ALL": _UNTRANSLATED_LOCALE, "LANG": _UNTRANSLATED_LOCALE}
     try:
         completed = subprocess.run(  # noqa: S603 - no shell, fixed arguments
             list(args),
@@ -134,6 +140,7 @@ def run_command(args: Sequence[str]) -> str:
             text=True,
             check=True,
             timeout=_COMMAND_TIMEOUT_SECONDS,
+            env=environment,
         )
     except FileNotFoundError as error:
         msg = f"command not found: {args[0]}"
@@ -160,11 +167,12 @@ class WifiDetector(Protocol):
         ...
 
 
-def _not_connected() -> NetworkDetectionError:
-    return NetworkDetectionError("this machine is not connected to a Wi-Fi network")
+def _not_connected(hint: str = "") -> NetworkDetectionError:
+    message = "this machine is not connected to a Wi-Fi network"
+    return NetworkDetectionError(f"{message} ({hint})" if hint else message)
 
 
-def _split_terse(line: str) -> list[str]:
+def split_terse(line: str) -> list[str]:
     """Split an ``nmcli -t`` line on unescaped colons and unescape the fields."""
     fields: list[str] = []
     current: list[str] = []
@@ -188,6 +196,7 @@ class NmcliDetector:
     """Linux detector based on NetworkManager's ``nmcli``."""
 
     COMMAND = ("nmcli", "-t", "-e", "yes", "-f", "ACTIVE,SSID,BSSID,SECURITY", "dev", "wifi")
+    HINT = "nmcli reported no active Wi-Fi row; check: nmcli -t -f ACTIVE,SSID dev wifi"
 
     def __init__(self, runner: CommandRunner = run_command) -> None:
         """Create the detector.
@@ -200,13 +209,13 @@ class NmcliDetector:
     def detect(self) -> DetectedNetwork:
         """Return the active Wi-Fi network reported by ``nmcli``."""
         for line in self._runner(self.COMMAND).splitlines():
-            fields = _split_terse(line)
+            fields = split_terse(line)
             if len(fields) == 4 and fields[0] == "yes":  # noqa: PLR2004
                 _, ssid, bssid, security = fields
                 if not ssid:
                     break
                 return DetectedNetwork(ssid, classify_security(security), bssid.lower() or None)
-        raise _not_connected()
+        raise _not_connected(self.HINT)
 
 
 class NetshDetector:
@@ -218,6 +227,7 @@ class NetshDetector:
     """
 
     COMMAND = ("netsh", "wlan", "show", "interfaces")
+    HINT = "netsh reported no SSID; check: netsh wlan show interfaces"
 
     def __init__(self, runner: CommandRunner = run_command) -> None:
         """Create the detector.
@@ -239,10 +249,10 @@ class NetshDetector:
                 ssid = value
             elif key.endswith("BSSID"):
                 bssid = value.lower() or None
-            elif auth is None and _WINDOWS_AUTH_VALUE.fullmatch(value.upper()):
+            elif auth is None and WINDOWS_AUTH_VALUE.fullmatch(value.upper()):
                 auth = value
         if not ssid:
-            raise _not_connected()
+            raise _not_connected(self.HINT)
         if auth is None:
             msg = "could not determine the Wi-Fi security from netsh output"
             raise UnsupportedSecurityError(msg)
@@ -257,6 +267,7 @@ class SystemProfilerDetector:
     """
 
     COMMAND = ("system_profiler", "SPAirPortDataType", "-json")
+    HINT = "no current network reported; check: networksetup -getairportnetwork en0"
 
     def __init__(self, runner: CommandRunner = run_command) -> None:
         """Create the detector.
@@ -279,7 +290,7 @@ class SystemProfilerDetector:
                 current = interface.get("spairport_current_network_information")
                 if current:
                     return self._from_current(current)
-        raise _not_connected()
+        raise _not_connected(self.HINT)
 
     @staticmethod
     def _from_current(current: Mapping[str, Any]) -> DetectedNetwork:
