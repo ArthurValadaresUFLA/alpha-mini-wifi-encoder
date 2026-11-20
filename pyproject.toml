@@ -52,13 +52,14 @@ ignore = [
     "COM812", # conflicts with the formatter
     "ISC001", # conflicts with the formatter
     "CPY001", # no per-file copyright header
+    "PLR0917", # click commands take one positional parameter per option
 ]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "S107", "PLR2004", "D", "ANN401", "SLF001", "FBT001", "INP001"]
+"tests/**" = ["S101", "S105", "S106", "S107", "PLR2004", "D", "ANN401", "SLF001", "FBT001", "FBT003", "INP001", "ARG001", "ARG002", "RUF012", "PYI034", "ASYNC109", "E501"]
 
 # --------------------------------------------------------------------------- mypy
 [tool.mypy]
