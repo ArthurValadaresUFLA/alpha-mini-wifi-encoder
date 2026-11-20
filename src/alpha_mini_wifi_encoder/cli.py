@@ -1,4 +1,16 @@
-"""Command-line interface: ``encode`` (offline), ``scan`` and ``send`` (BLE I/O)."""
+"""Command-line interface for provisioning a UBTECH Alpha Mini over Bluetooth Low Energy.
+
+The module exports the :func:`main` click group and its three commands:
+:func:`encode` builds a payload offline, :func:`scan` discovers nearby devices
+and :func:`send` writes the credentials to a robot. Only :func:`scan` and
+:func:`send` perform BLE I/O; :func:`encode` is entirely offline.
+
+It also exports the injectable factories :func:`create_prompter`,
+:func:`create_scanner` and :func:`create_writer`, which return a
+:class:`~.interactive.Prompter`, a :class:`~.ble.DeviceScanner` and a
+:class:`~.ble.GattWriter` respectively. Tests can substitute these factories
+to keep the command bodies free of concrete classes.
+"""
 
 from __future__ import annotations
 
@@ -54,30 +66,57 @@ _SERIALIZERS: dict[str, Callable[[], PayloadSerializer]] = {
     "gson": GsonCompatSerializer,
     "compact": CompactJsonSerializer,
 }
+"""dict[str, Callable[[], PayloadSerializer]]: Registry of JSON styles and serialisers."""
 _DEFAULT_FIXED_RANDOM_ID = 0x1234
+"""int: Default chunk random id used by ``encode`` for reproducible output."""
 
 
 # ----------------------------------------------------------------- factories
 # Module-level factories keep the command bodies free of concrete classes and
 # let tests substitute fakes.
 def create_prompter() -> Prompter:
-    """Return the interactive prompter (requires a terminal)."""
+    """Return the interactive prompter.
+
+    Returns:
+        Prompter: A ``questionary``-backed prompter for menus and hidden input.
+
+    Raises:
+        EncoderError: If standard input or output is not an interactive terminal.
+    """
     return QuestionaryPrompter()
 
 
 def create_scanner(*, include_unnamed: bool = False) -> DeviceScanner:
-    """Return the BLE device scanner."""
+    """Return the BLE device scanner.
+
+    Args:
+        include_unnamed (bool): Whether to keep devices that advertise no name.
+
+    Returns:
+        DeviceScanner: A ``bleak``-backed scanner for nearby Bluetooth devices.
+    """
     return BleakDeviceScanner(include_unnamed=include_unnamed)
 
 
 def create_writer() -> GattWriter:
-    """Return the BLE GATT writer."""
+    """Return the BLE GATT writer.
+
+    Returns:
+        GattWriter: A ``bleak``-backed writer for GATT chunks and notifications.
+    """
     return BleakGattWriter()
 
 
 # ------------------------------------------------------------------- options
 def _common_options(function: Callable[..., Any]) -> Callable[..., Any]:
-    """Options shared by ``encode`` and ``send``: which network and how to encode it."""
+    """Attach the network and encoding options shared by ``encode`` and ``send``.
+
+    Args:
+        function (Callable[..., Any]): Click callback to decorate with the options.
+
+    Returns:
+        Callable[..., Any]: The callback with every shared option attached.
+    """
     options = [
         click.option(
             "--cap", "capabilities", default=None, help='Capabilities, e.g. "[WPA2-PSK-CCMP]".'
@@ -133,6 +172,14 @@ def _common_options(function: Callable[..., Any]) -> Callable[..., Any]:
 
 # ------------------------------------------------------------------- helpers
 def _format_validation_error(error: ValidationError) -> str:
+    """Format a Pydantic validation error as one readable line.
+
+    Args:
+        error (ValidationError): Validation failure raised by a Pydantic model.
+
+    Returns:
+        str: Semicolon-separated ``field: message`` pairs from ``error.errors()``.
+    """
     return "; ".join(
         f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}" for item in error.errors()
     )
@@ -148,7 +195,26 @@ def _build_credentials(  # noqa: PLR0913 - mirrors the CLI options
     current_network: bool,
     include_bssid: bool,
 ) -> WifiCredentials:
-    """Merge explicit options with the detected current network (explicit wins)."""
+    """Merge explicit options with the detected current network (explicit wins).
+
+    Args:
+        ssid (str | None): Network name from ``--ssid``.
+        capabilities (str | None): Capability string from ``--cap``.
+        password (str | None): Password from ``--pwd`` or the environment.
+        bssid (str | None): Access-point MAC address from ``--bssid``.
+        dont_ping (str | None): Wire value for the optional ``v`` flag.
+        current_network (bool): Whether to detect the machine's current network.
+        include_bssid (bool): Whether to include the detected BSSID.
+
+    Returns:
+        WifiCredentials: Validated credentials built from the merged values.
+
+    Raises:
+        NetworkDetectionError: If the current network cannot be detected.
+        click.UsageError: If ``--ssid`` and ``--cap`` are missing without ``--current-network``.
+        click.Abort: If the user aborts the hidden password prompt.
+        ValidationError: If the merged values do not form valid credentials.
+    """
     if current_network:
         detected = create_detector().detect()
         Console(stderr=True).print(
@@ -186,14 +252,44 @@ def _build_credentials(  # noqa: PLR0913 - mirrors the CLI options
 
 
 def _make_encoder(json_style: str, ids: RandomIdProvider) -> WifiProvisioningEncoder:
+    """Build an encoder with the selected serialisation style and random ids.
+
+    Args:
+        json_style (str): Key into ``_SERIALIZERS`` from ``--json-style``.
+        ids (RandomIdProvider): Provider of chunk random ids.
+
+    Returns:
+        WifiProvisioningEncoder: Encoder using the chosen serialiser and trailer chunker.
+
+    Raises:
+        KeyError: If ``json_style`` is not a recognised serialisation style.
+    """
     return WifiProvisioningEncoder(_SERIALIZERS[json_style](), TrailerChunker(ids))
 
 
 def _command(*, change_wifi: bool | None) -> WifiCommand:
+    """Map the ``--change-wifi`` flag to the corresponding ``co`` command.
+
+    Args:
+        change_wifi (bool | None): ``True`` for ``co=2``, ``False`` or ``None`` for ``co=21``.
+
+    Returns:
+        WifiCommand: The command value to embed in the payload.
+    """
     return WifiCommand.WIFI_INFO_TRANS if change_wifi else WifiCommand.WIFI_INFO_TRANS_FOR_BINDING
 
 
 def _render_pretty(console: Console, result: EncodedProvisioning, *, show_layers: bool) -> None:
+    """Print the encoded payload, layers and GATT writes as Rich panels and tables.
+
+    Args:
+        console (Console): Rich console on which to print.
+        result (EncodedProvisioning): Encoded artefacts to display.
+        show_layers (bool): Whether to include the per-layer table.
+
+    Returns:
+        None: This function does not return a value.
+    """
     console.print(Panel(Syntax(result.json_text, "json", word_wrap=True), title="JSON payload"))
     if show_layers:
         layers = Table("Layer", "Bytes", "Hex", title="Layers")
@@ -210,6 +306,15 @@ def _render_pretty(console: Console, result: EncodedProvisioning, *, show_layers
 
 
 def _render_json(console: Console, result: EncodedProvisioning) -> None:
+    """Print the encoded artefacts as one JSON document.
+
+    Args:
+        console (Console): Rich console on which to print.
+        result (EncodedProvisioning): Encoded artefacts to serialise as JSON.
+
+    Returns:
+        None: This function does not return a value.
+    """
     document = {
         "json": result.json_text,
         "frame": result.frame.hex(),
@@ -219,6 +324,14 @@ def _render_json(console: Console, result: EncodedProvisioning) -> None:
 
 
 def _device_table(devices: list[BleDevice]) -> Table:
+    """Build a Rich table describing the devices found by a scan.
+
+    Args:
+        devices (list[BleDevice]): Devices to list, in display order.
+
+    Returns:
+        Table: A table with name, address, signal strength and service columns.
+    """
     table = Table("Name", "Address", "RSSI", "Alpha Mini service", title="Bluetooth devices")
     for device in devices:
         table.add_row(
@@ -231,12 +344,32 @@ def _device_table(devices: list[BleDevice]) -> Table:
 
 
 def _scan(console: Console, scanner: DeviceScanner, timeout: float) -> list[BleDevice]:
+    """Run a Bluetooth scan and return the devices found.
+
+    Args:
+        console (Console): Rich console used for the status indicator.
+        scanner (DeviceScanner): Scanner to run.
+        timeout (float): Scan duration in seconds.
+
+    Returns:
+        list[BleDevice]: Devices reported by the scanner.
+
+    Raises:
+        BleError: If the underlying scanner fails; propagated to the caller.
+    """
     with console.status(f"Scanning Bluetooth for {timeout:g}s..."):
         return asyncio.run(scanner.scan(timeout))
 
 
 def _safe[T](factory: Callable[[], T]) -> T | None:
-    """Return ``factory()`` or ``None`` when the OS is unsupported."""
+    """Return ``factory()`` or ``None`` when the OS is unsupported.
+
+    Args:
+        factory (Callable[[], T]): Zero-argument factory to call, such as a detector.
+
+    Returns:
+        T | None: The factory's result, or ``None`` on ``NetworkDetectionError``.
+    """
     try:
         return factory()
     except NetworkDetectionError:
@@ -244,10 +377,32 @@ def _safe[T](factory: Callable[[], T]) -> T | None:
 
 
 def _handle_errors[**P](function: Callable[P, None]) -> Callable[P, None]:
-    """Translate library exceptions to click exceptions."""
+    """Translate library exceptions to click exceptions.
+
+    Args:
+        function (Callable[P, None]): Click command callback to wrap.
+
+    Returns:
+        Callable[P, None]: A wrapper with the same signature that reports library
+            errors as click exceptions.
+    """
 
     @functools.wraps(function)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+        """Call the decorated callback and translate its library exceptions.
+
+        Args:
+            args (P.args): Positional arguments forwarded to the callback.
+            kwargs (P.kwargs): Keyword arguments forwarded to the callback.
+
+        Returns:
+            None: This function does not return a value.
+
+        Raises:
+            click.UsageError: If the callback raises a ``ValidationError``.
+            click.Abort: If the callback raises a ``UserAbortedError``.
+            click.ClickException: If the callback raises another ``EncoderError``.
+        """
         try:
             function(*args, **kwargs)
         except ValidationError as error:
@@ -264,7 +419,11 @@ def _handle_errors[**P](function: Callable[P, None]) -> Callable[P, None]:
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="alpha-mini-wifi-encode")
 def main() -> None:
-    """Encode and send Wi-Fi provisioning payloads to a UBTECH Alpha Mini over BLE."""
+    """Encode and send Wi-Fi provisioning payloads to a UBTECH Alpha Mini over BLE.
+
+    Returns:
+        None: This function does not return a value.
+    """
 
 
 # --------------------------------------------------------------------- encode
@@ -296,7 +455,32 @@ def encode(  # noqa: PLR0913 - one parameter per CLI option
     output_format: str,
     show_layers: bool,  # noqa: FBT001
 ) -> None:
-    """Encode a Wi-Fi provisioning request offline (nothing is sent anywhere)."""
+    """Encode a Wi-Fi provisioning request offline (nothing is sent anywhere).
+
+    Args:
+        capabilities (str | None): Capability string from ``--cap``.
+        ssid (str | None): Network name from ``--ssid``.
+        current_network (bool): Detect the network this machine is connected to.
+        include_bssid (bool): Include the detected BSSID with ``--current-network``.
+        password (str | None): Password from ``--pwd`` or the environment.
+        bssid (str | None): Access-point MAC address from ``--bssid``.
+        dont_ping (str | None): Wire value for the optional ``v`` flag.
+        change_wifi (bool | None): ``True`` for ``co=2``, ``False`` or ``None`` for ``co=21``.
+        send_serial (int): Header ``sendSerial`` value.
+        random_id (int | None): Fixed chunk random id, or ``None`` for the default.
+        json_style (str): Serialisation style key from ``--json-style``.
+        randomize (bool): Draw a random chunk id instead of using a fixed one.
+        output_format (str): Output style, either ``"pretty"`` or ``"json"``.
+        show_layers (bool): Also display each layer's output in pretty mode.
+
+    Returns:
+        None: This function does not return a value.
+
+    Raises:
+        click.UsageError: If network options are missing or validation fails.
+        ValidationError: If Pydantic rejects the credentials (translated by ``_handle_errors``).
+        EncoderError: If encoding fails (translated by ``_handle_errors``).
+    """
     console = Console()
     credentials = _build_credentials(
         ssid=ssid,
@@ -330,7 +514,18 @@ def encode(  # noqa: PLR0913 - one parameter per CLI option
 @click.option("--all-devices", is_flag=True, help="Also list devices without a name.")
 @_handle_errors
 def scan(scan_timeout: float, all_devices: bool) -> None:  # noqa: FBT001
-    """List nearby Bluetooth Low Energy devices."""
+    """List nearby Bluetooth Low Energy devices.
+
+    Args:
+        scan_timeout (float): Duration of the scan in seconds.
+        all_devices (bool): Whether to include devices that advertise no name.
+
+    Returns:
+        None: This function does not return a value.
+
+    Raises:
+        BleError: If the Bluetooth scan fails (translated to a click error).
+    """
     console = Console()
     devices = _scan(console, create_scanner(include_unnamed=all_devices), scan_timeout)
     console.print(_device_table(devices))
@@ -382,6 +577,36 @@ def send(  # noqa: PLR0913 - one parameter per CLI option
 
     Missing options (or -i) open arrow-key menus to pick the robot and the network.
     The password is kept in memory only: it is never written to disk.
+
+    Args:
+        capabilities (str | None): Capability string from ``--cap``.
+        ssid (str | None): Network name from ``--ssid``.
+        current_network (bool): Detect the network this machine is connected to.
+        include_bssid (bool): Include the detected BSSID with ``--current-network``.
+        password (str | None): Password from ``--pwd`` or the environment.
+        bssid (str | None): Access-point MAC address from ``--bssid``.
+        dont_ping (str | None): Wire value for the optional ``v`` flag.
+        change_wifi (bool | None): ``True`` for ``co=2``, ``False`` or ``None`` for ``co=21``.
+        send_serial (int): Header ``sendSerial`` value.
+        random_id (int | None): Fixed chunk random id, or ``None`` for a random one.
+        json_style (str): Serialisation style key from ``--json-style``.
+        device (str | None): Robot address from ``--device``, skipping the device menu.
+        interactive (bool): Always show the device and network menus.
+        scan_timeout (float): Duration of each device scan in seconds.
+        all_devices (bool): Whether to include devices that advertise no name.
+        dry_run (bool): Show the encoded bytes without connecting or sending.
+        assume_yes (bool): Skip the final confirmation prompt.
+        listen (float): Seconds to listen for the robot's notifications after writing.
+
+    Returns:
+        None: This function does not return a value.
+
+    Raises:
+        click.UsageError: If explicit network options are missing or validation fails.
+        ValidationError: If Pydantic rejects the credentials (translated by ``_handle_errors``).
+        UserAbortedError: If a prompt is cancelled or confirmation is declined (translated).
+        BleError: If scanning or writing fails (translated to a click error).
+        click.ClickException: If the robot reports an error in its notifications.
     """
     console = Console()
     explicit_network = current_network or (ssid is not None and capabilities is not None)
