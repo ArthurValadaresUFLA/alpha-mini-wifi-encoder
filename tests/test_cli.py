@@ -5,6 +5,7 @@ import pytest
 from click.testing import CliRunner
 
 from alpha_mini_wifi_encoder.cli import main
+from alpha_mini_wifi_encoder.network import DetectedNetwork, NetworkDetectionError, Security
 
 BASE = ["--cap", "[WPA-PSK-CCMP][WPA2-PSK-CCMP][ESS]", "--ssid", "MyWiFi", "--pwd", "password123"]
 
@@ -79,3 +80,75 @@ def test_module_entry_point(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_module("alpha_mini_wifi_encoder", run_name="__main__")
     assert exit_info.value.code == 0
+
+
+class FakeDetector:
+    def __init__(self, security: Security = Security.WPA2) -> None:
+        self._net = DetectedNetwork("LaptopNet", security, "aa:bb:cc:dd:ee:ff")
+
+    def detect(self) -> DetectedNetwork:
+        return self._net
+
+
+def use_detector(monkeypatch: pytest.MonkeyPatch, detector: object) -> None:
+    monkeypatch.setattr("alpha_mini_wifi_encoder.cli.create_detector", lambda: detector)
+
+
+def test_current_network_prompts_for_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    use_detector(monkeypatch, FakeDetector())
+    result = CliRunner().invoke(main, ["--current-network", "--output", "json"], input="secret\n")
+    assert result.exit_code == 0, result.output
+    text = json.loads(result.stdout)["json"]
+    assert text == '{"c":"WPA2","p":"secret","s":"LaptopNet","co":21}'
+
+
+def test_current_network_with_env_password_and_bssid(monkeypatch: pytest.MonkeyPatch) -> None:
+    use_detector(monkeypatch, FakeDetector())
+    result = CliRunner().invoke(
+        main,
+        ["--current-network", "--include-bssid", "--output", "json"],
+        env={"ALPHA_MINI_WIFI_PASSWORD": "pw"},
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["json"].startswith('{"b":"aa:bb:cc:dd:ee:ff","c":"WPA2"')
+
+
+def test_current_network_open_needs_no_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    use_detector(monkeypatch, FakeDetector(Security.OPEN))
+    result = CliRunner().invoke(main, ["--current-network", "--output", "json"])
+    assert result.exit_code == 0, result.output
+    assert '"p":""' in json.loads(result.stdout)["json"]
+
+
+def test_explicit_options_override_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    use_detector(monkeypatch, FakeDetector())
+    args = [
+        "--current-network",
+        "--ssid",
+        "Other",
+        "--cap",
+        "WPA",
+        "--pwd",
+        "x",
+        "--output",
+        "json",
+    ]
+    result = CliRunner().invoke(main, args)
+    assert json.loads(result.stdout)["json"] == '{"c":"WPA","p":"x","s":"Other","co":21}'
+
+
+def test_current_network_detection_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing() -> object:
+        message = "no wifi"
+        raise NetworkDetectionError(message)
+
+    monkeypatch.setattr("alpha_mini_wifi_encoder.cli.create_detector", failing)
+    result = CliRunner().invoke(main, ["--current-network"])
+    assert result.exit_code == 1
+    assert "no wifi" in result.output
+
+
+def test_ssid_and_cap_required_without_current_network() -> None:
+    result = CliRunner().invoke(main, ["--ssid", "only"])
+    assert result.exit_code == 2
+    assert "--current-network" in result.output
