@@ -16,6 +16,8 @@ dependencies = [
     "pydantic>=2.7",
     "protobuf>=5.26",
     "rich>=13.7",
+    "bleak>=3.1.0",
+    "questionary>=2.1.1",
 ]
 
 [project.scripts]
