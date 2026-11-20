@@ -20,6 +20,7 @@ from alpha_mini_wifi_encoder.encoder import WifiProvisioningEncoder
 from alpha_mini_wifi_encoder.errors import EncoderError
 from alpha_mini_wifi_encoder.ids import FixedRandomId, RandomIdProvider, SystemRandomId
 from alpha_mini_wifi_encoder.models import WifiCredentials
+from alpha_mini_wifi_encoder.network import Security, create_detector
 from alpha_mini_wifi_encoder.serializers import (
     CompactJsonSerializer,
     GsonCompatSerializer,
@@ -40,6 +41,53 @@ _SERIALIZERS: dict[str, Callable[[], PayloadSerializer]] = {
 def _format_validation_error(error: ValidationError) -> str:
     return "; ".join(
         f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}" for item in error.errors()
+    )
+
+
+def _build_credentials(  # noqa: PLR0913 - mirrors the CLI options
+    *,
+    ssid: str | None,
+    capabilities: str | None,
+    password: str | None,
+    bssid: str | None,
+    dont_ping: str | None,
+    current_network: bool,
+    include_bssid: bool,
+) -> WifiCredentials:
+    """Merge explicit options with the detected current network (explicit wins)."""
+    if current_network:
+        detected = create_detector().detect()
+        Console(stderr=True).print(
+            f"Using current network {escape(detected.ssid)!r} ({detected.security.name})",
+            highlight=False,
+        )
+        ssid = ssid or detected.ssid
+        capabilities = capabilities or detected.security.value
+        if bssid is None and include_bssid:
+            bssid = detected.bssid
+        if password is None:
+            password = (
+                ""
+                if detected.security is Security.OPEN
+                else click.prompt(
+                    f"Password for {ssid!r}",
+                    hide_input=True,
+                    default="",
+                    show_default=False,
+                    err=True,
+                )
+            )
+    elif ssid is None or capabilities is None:
+        msg = "--ssid and --cap are required unless --current-network is used"
+        raise click.UsageError(msg)
+    return WifiCredentials.model_validate(
+        {
+            "ssid": ssid,
+            "capabilities": capabilities,
+            "password": password or "",
+            "bssid": bssid,
+            "dont_ping": dont_ping,
+        },
     )
 
 
@@ -71,15 +119,23 @@ def _render_json(console: Console, result: EncodedProvisioning) -> None:
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="alpha-mini-wifi-encode")
-@click.option("--cap", "capabilities", required=True, help='Capabilities, e.g. "[WPA2-PSK-CCMP]".')
-@click.option("--ssid", required=True, help="Network name.")
+@click.option("--cap", "capabilities", default=None, help='Capabilities, e.g. "[WPA2-PSK-CCMP]".')
+@click.option("--ssid", default=None, help="Network name.")
+@click.option(
+    "--current-network",
+    is_flag=True,
+    help="Use the Wi-Fi network this machine is connected to (SSID and security are detected; "
+    "--ssid/--cap override). The password is asked for, never read from the OS.",
+)
+@click.option("--include-bssid", is_flag=True, help="With --current-network: also send the BSSID.")
 @click.option(
     "--pwd",
     "password",
-    default="",
+    default=None,
     envvar="ALPHA_MINI_WIFI_PASSWORD",
     show_envvar=True,
-    help="Network password (empty = open network). Prefer the environment variable.",
+    help="Network password (empty = open network). Prefer the environment variable; "
+    "with --current-network it is prompted for when omitted.",
 )
 @click.option("--bssid", default=None, help="Access-point MAC address.")
 @click.option("--dont-ping", type=click.Choice(["0", "1"]), default=None, help="Optional 'v' flag.")
@@ -109,9 +165,11 @@ def _render_json(console: Console, result: EncodedProvisioning) -> None:
 )
 @click.option("--layers", "show_layers", is_flag=True, help="Also show every layer's output.")
 def main(  # noqa: PLR0913 - one parameter per CLI option
-    capabilities: str,
-    ssid: str,
-    password: str,
+    capabilities: str | None,
+    ssid: str | None,
+    current_network: bool,  # noqa: FBT001
+    include_bssid: bool,  # noqa: FBT001
+    password: str | None,
     bssid: str | None,
     dont_ping: str | None,
     change_wifi: bool,  # noqa: FBT001
@@ -125,14 +183,14 @@ def main(  # noqa: PLR0913 - one parameter per CLI option
     """Encode a Wi-Fi provisioning request into BLE frames (offline, no BLE I/O)."""
     console = Console()
     try:
-        credentials = WifiCredentials.model_validate(
-            {
-                "ssid": ssid,
-                "capabilities": capabilities,
-                "password": password,
-                "bssid": bssid,
-                "dont_ping": dont_ping,
-            },
+        credentials = _build_credentials(
+            ssid=ssid,
+            capabilities=capabilities,
+            password=password,
+            bssid=bssid,
+            dont_ping=dont_ping,
+            current_network=current_network,
+            include_bssid=include_bssid,
         )
         ids: RandomIdProvider = SystemRandomId() if randomize else FixedRandomId(random_id)
         encoder = WifiProvisioningEncoder(_SERIALIZERS[json_style](), TrailerChunker(ids))
