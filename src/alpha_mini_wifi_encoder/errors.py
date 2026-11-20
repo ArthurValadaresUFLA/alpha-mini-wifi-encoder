@@ -1,4 +1,10 @@
-"""Exception hierarchy of the package."""
+"""Exception hierarchy of the package.
+
+:class:`EncoderError` is the common base for every error raised deliberately by
+this package. Its concrete subclasses distinguish payload-size violations,
+malformed frames, Bluetooth failures and user cancellation of interactive
+prompts.
+"""
 
 
 class EncoderError(Exception):

@@ -1,4 +1,9 @@
-"""JSON serialisation strategies for :class:`~.models.WifiPayload`."""
+"""JSON serialisation strategies for :class:`~.models.WifiPayload`.
+
+:class:`PayloadSerializer` declares the strategy interface. :class:`CompactJsonSerializer`
+produces minimal JSON with raw UTF-8, while :class:`GsonCompatSerializer` additionally escapes
+the characters that Gson's default ``htmlSafe`` mode transforms.
+"""
 
 from __future__ import annotations
 
@@ -19,13 +24,21 @@ _GSON_HTML_SAFE = str.maketrans(
         "\u2029": "\\u2029",
     },
 )
+"""dict[int, str]: Translation table escaping the characters Gson treats as HTML-sensitive."""
 
 
 class PayloadSerializer(Protocol):
     """Strategy turning a payload into the JSON text sent to the robot."""
 
     def serialize(self, payload: WifiPayload) -> str:
-        """Serialise ``payload`` to JSON text."""
+        """Serialise ``payload`` to JSON text.
+
+        Args:
+            payload (WifiPayload): Payload to serialise.
+
+        Returns:
+            str: JSON document representing the payload.
+        """
         ...
 
 
@@ -33,7 +46,14 @@ class CompactJsonSerializer:
     """Compact JSON (no spaces), raw UTF-8, no HTML escaping."""
 
     def serialize(self, payload: WifiPayload) -> str:
-        """Serialise ``payload`` to compact JSON text."""
+        """Serialise ``payload`` to compact JSON text.
+
+        Args:
+            payload (WifiPayload): Payload to serialise.
+
+        Returns:
+            str: Minimal JSON document with non-ASCII characters left intact.
+        """
         return json.dumps(payload.to_wire_dict(), ensure_ascii=False, separators=(",", ":"))
 
 
@@ -47,5 +67,12 @@ class GsonCompatSerializer(CompactJsonSerializer):
     """
 
     def serialize(self, payload: WifiPayload) -> str:
-        """Serialise ``payload`` the way Gson's default instance does."""
+        """Serialise ``payload`` the way Gson's default instance does.
+
+        Args:
+            payload (WifiPayload): Payload to serialise.
+
+        Returns:
+            str: Compact JSON document with Gson-compatible HTML escaping.
+        """
         return super().serialize(payload).translate(_GSON_HTML_SAFE)
