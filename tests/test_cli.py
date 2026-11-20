@@ -4,7 +4,7 @@ import runpy
 import pytest
 from click.testing import CliRunner
 
-from alpha_mini_wifi_encoder.cli import main
+from alpha_mini_wifi_encoder.cli import encode, main
 from alpha_mini_wifi_encoder.network import DetectedNetwork, NetworkDetectionError, Security
 
 BASE = ["--cap", "[WPA-PSK-CCMP][WPA2-PSK-CCMP][ESS]", "--ssid", "MyWiFi", "--pwd", "password123"]
@@ -12,7 +12,7 @@ BASE = ["--cap", "[WPA-PSK-CCMP][WPA2-PSK-CCMP][ESS]", "--ssid", "MyWiFi", "--pw
 
 def test_json_output_matches_report() -> None:
     args = [*BASE, "--bssid", "aa:bb:cc:dd:ee:ff", "--dont-ping", "0", "--output", "json"]
-    result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(encode, args)
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -22,7 +22,7 @@ def test_json_output_matches_report() -> None:
 
 
 def test_pretty_output_with_layers() -> None:
-    result = CliRunner().invoke(main, [*BASE, "--layers", "--change-wifi", "--randomize"])
+    result = CliRunner().invoke(encode, [*BASE, "--layers", "--change-wifi", "--randomize"])
     assert result.exit_code == 0, result.output
     assert "GATT writes" in result.output
     assert "Layer 4" in result.output
@@ -31,7 +31,7 @@ def test_pretty_output_with_layers() -> None:
 
 def test_compact_json_style() -> None:
     result = CliRunner().invoke(
-        main,
+        encode,
         [
             "--cap",
             "c",
@@ -50,20 +50,20 @@ def test_compact_json_style() -> None:
 
 
 def test_validation_error_is_reported_as_usage_error() -> None:
-    result = CliRunner().invoke(main, ["--cap", "c", "--ssid", "s", "--bssid", "oops"])
+    result = CliRunner().invoke(encode, ["--cap", "c", "--ssid", "s", "--bssid", "oops"])
     assert result.exit_code == 2
     assert "BSSID" in result.output
 
 
 def test_encoder_error_is_reported() -> None:
-    result = CliRunner().invoke(main, ["--cap", "c" * 70000, "--ssid", "s"])
+    result = CliRunner().invoke(encode, ["--cap", "c" * 70000, "--ssid", "s"])
     assert result.exit_code == 1
     assert "exceeds" in result.output
 
 
 def test_password_from_environment() -> None:
     result = CliRunner().invoke(
-        main,
+        encode,
         ["--cap", "c", "--ssid", "s", "--output", "json"],
         env={"ALPHA_MINI_WIFI_PASSWORD": "fromenv"},
     )
@@ -96,7 +96,7 @@ def use_detector(monkeypatch: pytest.MonkeyPatch, detector: object) -> None:
 
 def test_current_network_prompts_for_password(monkeypatch: pytest.MonkeyPatch) -> None:
     use_detector(monkeypatch, FakeDetector())
-    result = CliRunner().invoke(main, ["--current-network", "--output", "json"], input="secret\n")
+    result = CliRunner().invoke(encode, ["--current-network", "--output", "json"], input="secret\n")
     assert result.exit_code == 0, result.output
     text = json.loads(result.stdout)["json"]
     assert text == '{"c":"WPA2","p":"secret","s":"LaptopNet","co":21}'
@@ -105,7 +105,7 @@ def test_current_network_prompts_for_password(monkeypatch: pytest.MonkeyPatch) -
 def test_current_network_with_env_password_and_bssid(monkeypatch: pytest.MonkeyPatch) -> None:
     use_detector(monkeypatch, FakeDetector())
     result = CliRunner().invoke(
-        main,
+        encode,
         ["--current-network", "--include-bssid", "--output", "json"],
         env={"ALPHA_MINI_WIFI_PASSWORD": "pw"},
     )
@@ -115,7 +115,7 @@ def test_current_network_with_env_password_and_bssid(monkeypatch: pytest.MonkeyP
 
 def test_current_network_open_needs_no_password(monkeypatch: pytest.MonkeyPatch) -> None:
     use_detector(monkeypatch, FakeDetector(Security.OPEN))
-    result = CliRunner().invoke(main, ["--current-network", "--output", "json"])
+    result = CliRunner().invoke(encode, ["--current-network", "--output", "json"])
     assert result.exit_code == 0, result.output
     assert '"p":""' in json.loads(result.stdout)["json"]
 
@@ -133,7 +133,7 @@ def test_explicit_options_override_detection(monkeypatch: pytest.MonkeyPatch) ->
         "--output",
         "json",
     ]
-    result = CliRunner().invoke(main, args)
+    result = CliRunner().invoke(encode, args)
     assert json.loads(result.stdout)["json"] == '{"c":"WPA","p":"x","s":"Other","co":21}'
 
 
@@ -143,12 +143,12 @@ def test_current_network_detection_failure(monkeypatch: pytest.MonkeyPatch) -> N
         raise NetworkDetectionError(message)
 
     monkeypatch.setattr("alpha_mini_wifi_encoder.cli.create_detector", failing)
-    result = CliRunner().invoke(main, ["--current-network"])
+    result = CliRunner().invoke(encode, ["--current-network"])
     assert result.exit_code == 1
     assert "no wifi" in result.output
 
 
 def test_ssid_and_cap_required_without_current_network() -> None:
-    result = CliRunner().invoke(main, ["--ssid", "only"])
+    result = CliRunner().invoke(encode, ["--ssid", "only"])
     assert result.exit_code == 2
     assert "--current-network" in result.output
