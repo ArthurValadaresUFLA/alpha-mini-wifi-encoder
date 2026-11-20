@@ -3,6 +3,14 @@
 Only the network *description* (SSID, security, BSSID) is read from the
 operating system. The password is deliberately never read from OS keystores:
 it must be supplied by the user.
+
+The module exports the `Security` capability enum and the immutable
+`DetectedNetwork` value object, the `WifiDetector` strategy interface together
+with its Linux, Windows and macOS implementations (`NmcliDetector`,
+`NetshDetector` and `SystemProfilerDetector`), and the `create_detector`
+factory. The helpers `classify_security`, `split_terse` and `run_command` are
+shared with the saved-network module, while `NetworkDetectionError` and
+`UnsupportedSecurityError` report failures.
 """
 
 from __future__ import annotations
@@ -21,34 +29,55 @@ from alpha_mini_wifi_encoder.errors import EncoderError
 from alpha_mini_wifi_encoder.models import DontPing, WifiCredentials
 
 CommandRunner = Callable[[Sequence[str]], str]
-"""Callable that executes a command and returns its standard output."""
+"""Callable[[Sequence[str]], str]: Executes a command and returns its standard output."""
 
 _COMMAND_TIMEOUT_SECONDS = 10
+"""int: Maximum time in seconds allowed for an operating-system command."""
+
 _UNTRANSLATED_LOCALE = "C.UTF-8"
+"""str: Locale forced on child processes so that their output stays parseable."""
+
 _SECURITY_TOKENS = re.compile(r"WPA3|WPA2|WPA1|WPA|WEP|ENTERPRISE|802\.1X|NONE|OPEN|ABERTA|--")
+"""re.Pattern[str]: Recognised security tokens in operating-system descriptions."""
+
 WINDOWS_AUTH_VALUE = re.compile(r"^(?:OPEN|ABERTA|WEP|WPA\d?(?:-.+)?)$")
+"""re.Pattern[str]: Matches the authentication values emitted by `netsh`."""
+
 _REDACTED = "<redacted>"
+"""str: Placeholder used by macOS when the SSID is hidden from the caller."""
 
 
 class NetworkDetectionError(EncoderError):
-    """Raised when the current Wi-Fi network cannot be determined."""
+    """Raised when the current Wi-Fi network cannot be determined.
+
+    This covers missing operating-system tools, failed or malformed command
+    output, and machines with no active wireless connection.
+    """
 
 
 class UnsupportedSecurityError(NetworkDetectionError):
-    """Raised when the network uses a security mode the app flow cannot express."""
+    """Raised when the network uses a security mode the app flow cannot express.
+
+    Enterprise networks (EAP/802.1X) and WPA3-only networks are rejected because
+    the provisioning payload has no capability string for them.
+    """
 
 
 class Security(StrEnum):
     """Capability strings used by the app for the phone's *current* Wi-Fi.
 
-    The value ``N`` for open networks is taken from the analysis report's list of
-    ``WifiStatusHelper`` values and is not confirmed on hardware.
+    The value `N` for open networks is taken from the analysis report's list of
+    `WifiStatusHelper` values and is not confirmed on hardware.
     """
 
     OPEN = "N"
+    """Security: Capability string for an open, unsecured network."""
     WEP = "WEP"
+    """Security: Capability string for WEP-protected networks."""
     WPA = "WPA"
+    """Security: Capability string for legacy WPA networks."""
     WPA2 = "WPA2"
+    """Security: Capability string for WPA2 networks."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +85,9 @@ class DetectedNetwork:
     """Wi-Fi network detected on the local machine.
 
     Attributes:
-        ssid: Network name.
-        security: Security mode mapped to the app's capability vocabulary.
-        bssid: Access-point MAC address, when the OS exposes it.
+        ssid (str): Network name.
+        security (Security): Security mode mapped to the app's capability vocabulary.
+        bssid (str | None): Access-point MAC address, when the OS exposes it.
     """
 
     ssid: str
@@ -72,16 +101,16 @@ class DetectedNetwork:
         include_bssid: bool = False,
         dont_ping: DontPing | None = None,
     ) -> WifiCredentials:
-        """Convert to validated credentials.
+        """Convert the detected network to validated credentials.
 
         Args:
-            password: Network password (empty for open networks).
-            include_bssid: Whether to send the BSSID; the native app flow for the
-                phone's current network omits it.
-            dont_ping: Optional ``v`` flag.
+            password (str): Network password (empty for open networks).
+            include_bssid (bool): Whether to send the BSSID; the native app flow for
+                the phone's current network omits it.
+            dont_ping (DontPing | None): Optional `v` flag.
 
         Returns:
-            Credentials ready for :class:`~.encoder.WifiProvisioningEncoder`.
+            WifiCredentials: Credentials ready for `WifiProvisioningEncoder`.
         """
         return WifiCredentials(
             ssid=self.ssid,
@@ -93,14 +122,14 @@ class DetectedNetwork:
 
 
 def classify_security(raw: str) -> Security:
-    """Map an OS-specific security description to :class:`Security`.
+    """Map an OS-specific security description to `Security`.
 
     Args:
-        raw: Text such as ``"WPA2"``, ``"WPA2-Personal"`` or
-            ``"spairport_security_mode_wpa2_personal"``.
+        raw (str): Text such as `WPA2`, `WPA2-Personal` or
+            `spairport_security_mode_wpa2_personal`.
 
     Returns:
-        The matching security mode (WPA2 wins in WPA2/WPA3 transition mode).
+        Security: The matching security mode (WPA2 wins in WPA2/WPA3 transition mode).
 
     Raises:
         UnsupportedSecurityError: For enterprise, WPA3-only or unknown modes.
@@ -124,10 +153,16 @@ def classify_security(raw: str) -> Security:
 
 
 def run_command(args: Sequence[str]) -> str:
-    """Run ``args`` without a shell and return its standard output.
+    """Run `args` without a shell and return its standard output.
 
-    The child runs with an untranslated locale: tools such as ``nmcli`` translate
-    their output (``yes`` becomes ``sim`` in pt_BR), which would break parsing.
+    The child runs with an untranslated locale: tools such as `nmcli` translate
+    their output (`yes` becomes `sim` in pt_BR), which would break parsing.
+
+    Args:
+        args (Sequence[str]): Command and arguments to execute.
+
+    Returns:
+        str: Standard output produced by the command.
 
     Raises:
         NetworkDetectionError: If the command is missing, fails or times out.
@@ -160,6 +195,9 @@ class WifiDetector(Protocol):
     def detect(self) -> DetectedNetwork:
         """Return the current network.
 
+        Returns:
+            DetectedNetwork: The active wireless network with its security mode.
+
         Raises:
             NetworkDetectionError: If the machine is not connected or the
                 output cannot be understood.
@@ -168,12 +206,27 @@ class WifiDetector(Protocol):
 
 
 def _not_connected(hint: str = "") -> NetworkDetectionError:
+    """Create a `NetworkDetectionError` for a machine with no active Wi-Fi link.
+
+    Args:
+        hint (str): Optional diagnostic command appended to the error message.
+
+    Returns:
+        NetworkDetectionError: The error to raise at the call site.
+    """
     message = "this machine is not connected to a Wi-Fi network"
     return NetworkDetectionError(f"{message} ({hint})" if hint else message)
 
 
 def split_terse(line: str) -> list[str]:
-    """Split an ``nmcli -t`` line on unescaped colons and unescape the fields."""
+    """Split an `nmcli -t` line on unescaped colons and unescape the fields.
+
+    Args:
+        line (str): A single terse line as printed by `nmcli`.
+
+    Returns:
+        list[str]: The unescaped fields, including empty ones.
+    """
     fields: list[str] = []
     current: list[str] = []
     escaped = False
@@ -193,21 +246,36 @@ def split_terse(line: str) -> list[str]:
 
 
 class NmcliDetector:
-    """Linux detector based on NetworkManager's ``nmcli``."""
+    """Linux detector based on NetworkManager's `nmcli`."""
 
     COMMAND = ("nmcli", "-t", "-e", "yes", "-f", "ACTIVE,SSID,BSSID,SECURITY", "dev", "wifi")
+    """tuple[str, ...]: Arguments requesting active Wi-Fi devices with escaped fields."""
+
     HINT = "nmcli reported no active Wi-Fi row; check: nmcli -t -f ACTIVE,SSID dev wifi"
+    """str: Diagnostic command included when no active network is found."""
 
     def __init__(self, runner: CommandRunner = run_command) -> None:
         """Create the detector.
 
         Args:
-            runner: Command executor (injectable for tests).
+            runner (CommandRunner): Command executor (injectable for tests).
+
+        Returns:
+            None: This function does not return a value.
         """
         self._runner = runner
 
     def detect(self) -> DetectedNetwork:
-        """Return the active Wi-Fi network reported by ``nmcli``."""
+        """Return the active Wi-Fi network reported by `nmcli`.
+
+        Returns:
+            DetectedNetwork: The first active row exposing a non-empty SSID.
+
+        Raises:
+            NetworkDetectionError: If no active Wi-Fi row is reported or the
+                command fails.
+            UnsupportedSecurityError: If the reported security mode is unknown.
+        """
         for line in self._runner(self.COMMAND).splitlines():
             fields = split_terse(line)
             if len(fields) == 4 and fields[0] == "yes":  # noqa: PLR2004
@@ -219,26 +287,41 @@ class NmcliDetector:
 
 
 class NetshDetector:
-    """Windows detector based on ``netsh wlan show interfaces``.
+    """Windows detector based on `netsh wlan show interfaces`.
 
-    ``SSID`` and ``BSSID`` keys are language-neutral; the authentication value is
-    matched by content (``Open``/``Aberta``, ``WPA2-Personal``...), so English and
+    `SSID` and `BSSID` keys are language-neutral; the authentication value is
+    matched by content (`Open`/`Aberta`, `WPA2-Personal`...), so English and
     Portuguese output are both understood.
     """
 
     COMMAND = ("netsh", "wlan", "show", "interfaces")
+    """tuple[str, ...]: Arguments listing the Windows wireless interfaces."""
+
     HINT = "netsh reported no SSID; check: netsh wlan show interfaces"
+    """str: Diagnostic command included when no SSID is found."""
 
     def __init__(self, runner: CommandRunner = run_command) -> None:
         """Create the detector.
 
         Args:
-            runner: Command executor (injectable for tests).
+            runner (CommandRunner): Command executor (injectable for tests).
+
+        Returns:
+            None: This function does not return a value.
         """
         self._runner = runner
 
     def detect(self) -> DetectedNetwork:
-        """Return the connected network reported by ``netsh``."""
+        """Return the connected network reported by `netsh`.
+
+        Returns:
+            DetectedNetwork: The connected network with its security mode.
+
+        Raises:
+            NetworkDetectionError: If no SSID is present or the command fails.
+            UnsupportedSecurityError: If the authentication value is missing or
+                cannot be mapped to a capability string.
+        """
         ssid: str | None = None
         bssid: str | None = None
         auth: str | None = None
@@ -260,25 +343,40 @@ class NetshDetector:
 
 
 class SystemProfilerDetector:
-    """Best-effort macOS detector based on ``system_profiler SPAirPortDataType``.
+    """Best-effort macOS detector based on `system_profiler SPAirPortDataType`.
 
     Recent macOS versions redact the SSID unless the calling application has
     Location Services permission; that case is reported as an error.
     """
 
     COMMAND = ("system_profiler", "SPAirPortDataType", "-json")
+    """tuple[str, ...]: Arguments requesting the airport data as JSON."""
+
     HINT = "no current network reported; check: networksetup -getairportnetwork en0"
+    """str: Diagnostic command included when no current network is found."""
 
     def __init__(self, runner: CommandRunner = run_command) -> None:
         """Create the detector.
 
         Args:
-            runner: Command executor (injectable for tests).
+            runner (CommandRunner): Command executor (injectable for tests).
+
+        Returns:
+            None: This function does not return a value.
         """
         self._runner = runner
 
     def detect(self) -> DetectedNetwork:
-        """Return the current network from the profiler's JSON output."""
+        """Return the current network from the profiler's JSON output.
+
+        Returns:
+            DetectedNetwork: The network attached to the first reporting interface.
+
+        Raises:
+            NetworkDetectionError: If the JSON output is malformed, no current
+                network is reported, or the command fails.
+            UnsupportedSecurityError: If the reported security mode is unknown.
+        """
         try:
             document: Mapping[str, Any] = json.loads(self._runner(self.COMMAND))
             sections = document["SPAirPortDataType"]
@@ -294,6 +392,18 @@ class SystemProfilerDetector:
 
     @staticmethod
     def _from_current(current: Mapping[str, Any]) -> DetectedNetwork:
+        """Build a `DetectedNetwork` from the profiler's current-network mapping.
+
+        Args:
+            current (Mapping[str, Any]): `spairport_current_network_information` entry.
+
+        Returns:
+            DetectedNetwork: The network with its SSID and mapped security mode.
+
+        Raises:
+            NetworkDetectionError: If the SSID is missing or redacted.
+            UnsupportedSecurityError: If the security mode is unsupported.
+        """
         ssid = str(current.get("_name", ""))
         if not ssid or ssid == _REDACTED:
             msg = "macOS redacted the SSID (grant Location Services permission to the terminal)"
@@ -306,11 +416,14 @@ def create_detector(
     system: str | None = None,
     runner: CommandRunner = run_command,
 ) -> WifiDetector:
-    """Return the detector for an operating system (Factory).
+    """Create the network detector for an operating system (factory).
 
     Args:
-        system: ``platform.system()`` value; defaults to the running OS.
-        runner: Command executor shared with the detector.
+        system (str | None): `platform.system()` value; defaults to the running OS.
+        runner (CommandRunner): Command executor shared with the detector.
+
+    Returns:
+        WifiDetector: The detector for the requested platform.
 
     Raises:
         NetworkDetectionError: If the operating system is not supported.
