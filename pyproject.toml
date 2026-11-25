@@ -1,11 +1,11 @@
 [project]
 name = "alpha-mini-wifi-encoder"
-version = "0.1.0"
-description = "Encoder and BLE sender for the UBTECH Alpha Mini Wi-Fi provisioning payload."
+version = "0.2.0"
+description = "Wi-Fi provisioning encoder and programming-mode (BLE/LAN) client for the UBTECH Alpha Mini."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-keywords = ["ble", "protobuf", "provisioning", "reverse-engineering", "alpha-mini"]
+keywords = ["ble", "lan", "mdns", "protobuf", "provisioning", "reverse-engineering", "alpha-mini"]
 classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
@@ -18,6 +18,7 @@ dependencies = [
     "rich>=13.7",
     "bleak>=3.1.0",
     "questionary>=2.1.1",
+    "zeroconf>=0.132",
 ]
 
 [project.scripts]

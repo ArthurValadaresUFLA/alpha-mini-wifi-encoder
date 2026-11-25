@@ -72,7 +72,7 @@ def test_password_from_environment() -> None:
 
 def test_version() -> None:
     result = CliRunner().invoke(main, ["--version"])
-    assert "0.1.0" in result.output
+    assert "0.2.0" in result.output
 
 
 def test_module_entry_point(monkeypatch: pytest.MonkeyPatch) -> None:
