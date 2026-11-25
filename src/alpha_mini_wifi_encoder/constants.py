@@ -75,3 +75,50 @@ class WifiCommand(IntEnum):
 
     WIFI_INFO_TRANS_FOR_BINDING = 21
     """int: Send Wi-Fi information while binding the robot."""
+
+
+class CodeMaoCommand(IntEnum):
+    """Enumerate the ``MessageHeader.commandId`` values of the programming (CodeMao) skill."""
+
+    REVERT_ORIGIN = 28
+    """int: Return the robot to its origin pose (``RevertOriginRequest``)."""
+
+    HANDSHAKE = 29
+    """int: Start the programming skill (``HandShakeRequest``)."""
+
+    CONTROL_RUNNING_PROGRAM = 33
+    """int: Start or stop the running program (``ControlRunningProgramRequest``)."""
+
+
+CODEMAO_HEADER_VERSION: Final[int] = 1
+"""int: ``MessageHeader.versionCode`` used by the app for every CodeMao command."""
+
+LAN_HANDSHAKE_REQUEST_COMMAND: Final[int] = 0
+"""int: ``commandId`` of the LAN handshake request (inferred from the analysis report)."""
+
+LAN_HANDSHAKE_RESPONSE_COMMAND: Final[int] = 1000
+"""int: ``commandId`` of the expected LAN handshake response."""
+
+LAN_KICKED_COMMAND: Final[int] = 18001
+"""int: ``commandId`` announcing that another client took over the LAN channel."""
+
+LAN_HANDSHAKE_TIMEOUT_SECONDS: Final[float] = 15.0
+"""float: Seconds the app waits for the LAN handshake response."""
+
+LAN_READ_TIMEOUT_SECONDS: Final[float] = 7.0
+"""float: Seconds of read silence after which the app drops the LAN connection."""
+
+LAN_WRITER_IDLE_SECONDS: Final[float] = 5.0
+"""float: Seconds of write silence after which the app emits a heartbeat."""
+
+LAN_HEARTBEAT_PING: Final[bytes] = b"\x00"
+"""bytes: Heartbeat payload sent when the LAN writer is idle (assumed, see the report)."""
+
+LAN_HEARTBEAT_PAYLOADS: Final[frozenset[bytes]] = frozenset({b"\x00", b"\x01"})
+"""frozenset[bytes]: Frame payloads treated as heartbeats and never delivered to sessions."""
+
+LAN_MDNS_SERVICE_TYPE: Final[str] = "DEDU_mini_robot_control._tcp.local."
+"""str: mDNS service type constant found in the app (normalised with a ``_`` prefix on use)."""
+
+APP_VERSION_NAME: Final[str] = "1.3.2"
+"""str: Version of the companion app this package mimics in the LAN handshake."""

@@ -25,3 +25,19 @@ class BleError(EncoderError):
 
 class UserAbortedError(EncoderError):
     """Raised when the user cancels an interactive prompt."""
+
+
+class ProtocolError(EncoderError):
+    """Raised when received bytes are not a decodable protocol message."""
+
+
+class LanError(EncoderError):
+    """Raised when the LAN (TCP) channel cannot be opened, is lost or fails its handshake."""
+
+
+class ReplyTimeoutError(EncoderError):
+    """Raised when the robot does not answer a request in time."""
+
+
+class ChannelKickedError(EncoderError):
+    """Raised when the robot reports that another client took over the channel."""
