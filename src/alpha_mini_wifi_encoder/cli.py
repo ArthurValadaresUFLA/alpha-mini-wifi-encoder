@@ -15,12 +15,10 @@ to keep the command bodies free of concrete classes.
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 from typing import TYPE_CHECKING, Any
 
 import click
-from pydantic import ValidationError
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -31,9 +29,11 @@ from rich.table import Table
 from alpha_mini_wifi_encoder import __version__
 from alpha_mini_wifi_encoder.ble import BleakDeviceScanner, BleakGattWriter, BleDevice
 from alpha_mini_wifi_encoder.chunking import TrailerChunker
+from alpha_mini_wifi_encoder.cli_program import lan_scan, program
+from alpha_mini_wifi_encoder.cli_support import handle_errors
 from alpha_mini_wifi_encoder.constants import MAX_RANDOM_ID, WifiCommand
 from alpha_mini_wifi_encoder.encoder import WifiProvisioningEncoder
-from alpha_mini_wifi_encoder.errors import EncoderError, UserAbortedError
+from alpha_mini_wifi_encoder.errors import UserAbortedError
 from alpha_mini_wifi_encoder.ids import FixedRandomId, RandomIdProvider, SystemRandomId
 from alpha_mini_wifi_encoder.interactive import (
     Prompter,
@@ -171,20 +171,6 @@ def _common_options(function: Callable[..., Any]) -> Callable[..., Any]:
 
 
 # ------------------------------------------------------------------- helpers
-def _format_validation_error(error: ValidationError) -> str:
-    """Format a Pydantic validation error as one readable line.
-
-    Args:
-        error (ValidationError): Validation failure raised by a Pydantic model.
-
-    Returns:
-        str: Semicolon-separated ``field: message`` pairs from ``error.errors()``.
-    """
-    return "; ".join(
-        f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}" for item in error.errors()
-    )
-
-
 def _build_credentials(  # noqa: PLR0913 - mirrors the CLI options
     *,
     ssid: str | None,
@@ -376,45 +362,6 @@ def _safe[T](factory: Callable[[], T]) -> T | None:
         return None
 
 
-def _handle_errors[**P](function: Callable[P, None]) -> Callable[P, None]:
-    """Translate library exceptions to click exceptions.
-
-    Args:
-        function (Callable[P, None]): Click command callback to wrap.
-
-    Returns:
-        Callable[P, None]: A wrapper with the same signature that reports library
-            errors as click exceptions.
-    """
-
-    @functools.wraps(function)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        """Call the decorated callback and translate its library exceptions.
-
-        Args:
-            args (P.args): Positional arguments forwarded to the callback.
-            kwargs (P.kwargs): Keyword arguments forwarded to the callback.
-
-        Returns:
-            None: This function does not return a value.
-
-        Raises:
-            click.UsageError: If the callback raises a ``ValidationError``.
-            click.Abort: If the callback raises a ``UserAbortedError``.
-            click.ClickException: If the callback raises another ``EncoderError``.
-        """
-        try:
-            function(*args, **kwargs)
-        except ValidationError as error:
-            raise click.UsageError(_format_validation_error(error)) from error
-        except UserAbortedError as error:
-            raise click.Abort from error
-        except EncoderError as error:
-            raise click.ClickException(str(error)) from error
-
-    return wrapper
-
-
 # ---------------------------------------------------------------------- group
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="alpha-mini-wifi-encode")
@@ -424,6 +371,10 @@ def main() -> None:
     Returns:
         None: This function does not return a value.
     """
+
+
+main.add_command(program)
+main.add_command(lan_scan)
 
 
 # --------------------------------------------------------------------- encode
@@ -438,7 +389,7 @@ def main() -> None:
     show_default=True,
 )
 @click.option("--layers", "show_layers", is_flag=True, help="Also show every layer's output.")
-@_handle_errors
+@handle_errors
 def encode(  # noqa: PLR0913 - one parameter per CLI option
     capabilities: str | None,
     ssid: str | None,
@@ -478,8 +429,8 @@ def encode(  # noqa: PLR0913 - one parameter per CLI option
 
     Raises:
         click.UsageError: If network options are missing or validation fails.
-        ValidationError: If Pydantic rejects the credentials (translated by ``_handle_errors``).
-        EncoderError: If encoding fails (translated by ``_handle_errors``).
+        ValidationError: If Pydantic rejects the credentials (translated by ``handle_errors``).
+        EncoderError: If encoding fails (translated by ``handle_errors``).
     """
     console = Console()
     credentials = _build_credentials(
@@ -512,7 +463,7 @@ def encode(  # noqa: PLR0913 - one parameter per CLI option
 @main.command()
 @click.option("--scan-timeout", type=click.FloatRange(min=1), default=8.0, show_default=True)
 @click.option("--all-devices", is_flag=True, help="Also list devices without a name.")
-@_handle_errors
+@handle_errors
 def scan(scan_timeout: float, all_devices: bool) -> None:  # noqa: FBT001
     """List nearby Bluetooth Low Energy devices.
 
@@ -552,7 +503,7 @@ def scan(scan_timeout: float, all_devices: bool) -> None:  # noqa: FBT001
     show_default=True,
     help="Seconds to wait for the robot's notifications after writing.",
 )
-@_handle_errors
+@handle_errors
 def send(  # noqa: PLR0913 - one parameter per CLI option
     capabilities: str | None,
     ssid: str | None,
@@ -603,7 +554,7 @@ def send(  # noqa: PLR0913 - one parameter per CLI option
 
     Raises:
         click.UsageError: If explicit network options are missing or validation fails.
-        ValidationError: If Pydantic rejects the credentials (translated by ``_handle_errors``).
+        ValidationError: If Pydantic rejects the credentials (translated by ``handle_errors``).
         UserAbortedError: If a prompt is cancelled or confirmation is declined (translated).
         BleError: If scanning or writing fails (translated to a click error).
         click.ClickException: If the robot reports an error in its notifications.
