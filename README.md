@@ -59,6 +59,58 @@ SSID and security of the current network are detected and mapped to the app's va
 The BSSID is omitted unless `--include-bssid` is given, like the app's native flow. `--ssid`,
 `--cap` and `--bssid` override detected values.
 
+## Programming mode and online operation (v0.2)
+
+Besides Wi-Fi provisioning, the package implements the app's **programming (CodeMao) skill**
+over two transports, based on the analysis report (static analysis only; **not validated on
+hardware**).
+
+```console
+# Offline: show the exact frame and GATT writes of a command
+alpha-mini-wifi-encode program encode --programme-version 3 --action handshake
+alpha-mini-wifi-encode program encode --programme-version 3 --action start --output json
+
+# BLE: handshake (cmdId 29), then run / stop / revert origin (33 / 33 / 28)
+alpha-mini-wifi-encode scan
+alpha-mini-wifi-encode program run --programme-version 3 --device AA:BB:CC:DD:EE:FF \
+    --do start --hold 10
+
+# LAN (robot already online on Wi-Fi): discover via mDNS, then connect over TCP
+alpha-mini-wifi-encode lan-scan
+alpha-mini-wifi-encode program run --programme-version 3 --via lan --host 192.168.0.50 --port 9000
+```
+
+| Layer | Module | Role |
+| --- | --- | --- |
+| Messages | `codemao_messages`, `codemao` | Protobuf bodies, envelope codec, typed results |
+| Framing | `frames` | Incremental `FB BF 01 ... ED` stream decoder |
+| Session | `session` | `sendSerial` counter, reply correlation, events, timeouts |
+| BLE | `ble_transport` | Persistent GATT link, 16-byte slices, notification reassembly |
+| LAN | `lan`, `lan_discovery` | TCP + app handshake (0 -> 1000), heartbeat, mDNS scan |
+
+```python
+async with CodeMaoSession(LanTransport(host, port)) as session:
+    await session.handshake(user_id="0", nickname="me", programme_version=3)
+    await session.start_program()
+```
+
+Safety: only handshake, start/stop program and revert origin are exposed. There is no reset,
+erase, unbind, factory or ADB command (ADB goes through Tencent IM in the app and is out of
+scope), and the LAN handshake uses freshly generated random identifiers, never copied ones.
+`program run` asks for confirmation unless `--yes` is given.
+
+### Assumptions to verify on hardware
+
+* **Frame checksum byte.** The report states `(len + 2) & 0xFF`, but the existing, byte-exact
+  Wi-Fi encoder (and these commands) write the constant `0x01`. The report's definition of
+  `len` is ambiguous; if the robot rejects frames, start here (`layers.FrameLayer`).
+* **Response field numbers** and the **LAN handshake fields** (`uuid`, `appVersion`, `locale`,
+  `deviceType`, `sessionId`) assume consecutive numbers in the order listed in the report.
+* **Reply correlation** assumes `responseSerial == sendSerial` (falling back to `commandId`).
+* **LAN heartbeat** payload `0x00` (ping) / `0x01`, the 7 s read timeout and the mDNS service
+  type (`_DEDU_mini_robot_control._tcp.local.`) come from the report, unconfirmed.
+* **BLE notifications** are assumed to carry the 4-byte trailer (`--raw-notifications` otherwise).
+
 ## Wire format (summary)
 
 | Layer | Content |
