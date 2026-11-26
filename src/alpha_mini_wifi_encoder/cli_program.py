@@ -46,6 +46,7 @@ from alpha_mini_wifi_encoder.ids import FixedRandomId
 from alpha_mini_wifi_encoder.lan import LanTransport
 from alpha_mini_wifi_encoder.lan_discovery import DiscoveryReport, LanScanner, ZeroconfLanScanner
 from alpha_mini_wifi_encoder.network import NetworkDetectionError, WifiDetector, create_detector
+from alpha_mini_wifi_encoder.port_probe import DEFAULT_DIAG_PORTS, PROBE_TOOL, probe_ports
 from alpha_mini_wifi_encoder.session import (
     DEFAULT_REPLY_TIMEOUT_SECONDS,
     CodeMaoSession,
@@ -602,3 +603,90 @@ def lan_scan(scan_timeout: float, expect_ssid: str | None, interfaces: tuple[str
         None: This function does not return a value.
     """
     _run_scan(scan_timeout, expect_ssid, interfaces, Console())
+
+
+def _parse_ports(raw: str) -> tuple[int, ...]:
+    """Parse a comma-separated port list.
+
+    Args:
+        raw (str): Text such as ``"7000,8801"``.
+
+    Returns:
+        tuple[int, ...]: The ports, in order.
+
+    Raises:
+        click.BadParameter: If an entry is not a port number.
+    """
+    try:
+        ports = tuple(int(part) for part in raw.split(",") if part.strip())
+    except ValueError as error:
+        msg = f"invalid port list: {raw!r}"
+        raise click.BadParameter(msg) from error
+    if not ports or any(not 0 < port < 65536 for port in ports):  # noqa: PLR2004
+        msg = f"invalid port list: {raw!r}"
+        raise click.BadParameter(msg)
+    return ports
+
+
+@click.command("lan-diag")
+@_scan_options
+@click.option("--host", default=None, help="With --diag-connect: robot IP to test.")
+@click.option(
+    "--ports",
+    default=",".join(str(p) for p in DEFAULT_DIAG_PORTS),
+    show_default=True,
+    help="With --diag-connect: ports to test.",
+)
+@click.option("--diag-connect", is_flag=True, help="Also test TCP reachability (sends no bytes).")
+@click.option("--yes", "-y", "assume_yes", is_flag=True, help="Do not ask for confirmation.")
+@handle_errors
+def lan_diag(  # noqa: PLR0913 - one parameter per CLI option
+    scan_timeout: float,
+    expect_ssid: str | None,
+    interfaces: tuple[str, ...],
+    host: str | None,
+    ports: str,
+    diag_connect: bool,  # noqa: FBT001
+    assume_yes: bool,  # noqa: FBT001
+) -> None:
+    """Passive LAN diagnosis: mDNS inventory and, on request, TCP reachability.
+
+    No protocol byte is ever written: the TCP test opens and closes the connection.
+
+    Args:
+        scan_timeout (float): Seconds to browse.
+        expect_ssid (str | None): Abort unless connected to this network.
+        interfaces (tuple[str, ...]): Local addresses to bind multicast to.
+        host (str | None): Robot IP for the TCP test.
+        ports (str): Comma-separated ports for the TCP test.
+        diag_connect (bool): Whether to run the TCP test.
+        assume_yes (bool): Skip the confirmation prompt.
+
+    Returns:
+        None: This function does not return a value.
+
+    Raises:
+        click.UsageError: If ``--diag-connect`` is used without ``--host``.
+        UserAbortedError: If the confirmation is declined (translated to an abort).
+    """
+    console = Console()
+    port_list = _parse_ports(ports)
+    if diag_connect and host is None:
+        msg = "--host is required with --diag-connect"
+        raise click.UsageError(msg)
+    _run_scan(scan_timeout, expect_ssid, interfaces, console)
+    if not diag_connect or host is None:
+        return
+    console.print(
+        f"TCP test: {escape(host)} ports {', '.join(map(str, port_list))} via {PROBE_TOOL}"
+    )
+    if not assume_yes and not click.confirm("Open and close a TCP connection to each port?"):
+        raise UserAbortedError
+    results = asyncio.run(probe_ports(host, port_list))
+    table = Table("Port", "Open", "Detail", title=f"TCP reachability ({PROBE_TOOL})")
+    for result in results:
+        table.add_row(str(result.port), "yes" if result.is_open else "no", escape(result.detail))
+    console.print(table)
+    console.print(
+        "[dim]Only the listed ports were tested; 'no' says nothing about other ports.[/dim]"
+    )

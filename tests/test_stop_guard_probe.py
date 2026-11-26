@@ -14,6 +14,7 @@ from alpha_mini_wifi_encoder.codemao import (
 )
 from alpha_mini_wifi_encoder.constants import LAN_HEARTBEAT_PAYLOADS
 from alpha_mini_wifi_encoder.layers import FrameLayer, LanFrameLayer, unpack_frame
+from alpha_mini_wifi_encoder.port_probe import PROBE_TOOL, probe_ports
 from alpha_mini_wifi_encoder.session import CodeMaoSession
 from alpha_mini_wifi_encoder.stop_guard import StopConditionError, StopGuard
 from tests.codemao_helpers import ScriptedTransport
@@ -109,3 +110,74 @@ class TestLanFraming:
     def test_heartbeat_payloads(self) -> None:
         assert {b"\x00", b"\x01"} == LAN_HEARTBEAT_PAYLOADS
 
+
+@asynccontextmanager
+async def listening() -> AsyncIterator[int]:
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        data = await reader.read(10)
+        assert data == b""  # the probe must never write anything
+        writer.close()
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+class TestPortProbe:
+    def test_open_and_refused_ports_in_order(self) -> None:
+        async def scenario() -> list[tuple[int, bool, str]]:
+            async with listening() as open_port:
+                async with listening() as other:
+                    pass
+                results = await probe_ports("127.0.0.1", [open_port, other], timeout=1)
+            return [(r.port, r.is_open, r.detail) for r in results]
+
+        (first, second) = asyncio.run(scenario())
+        assert first[1:] == (True, "open")
+        assert second[1] is False
+        assert second[2] in {"refused", "timeout"} or second[2]
+
+    def test_timeout_and_os_error_are_classified(self) -> None:
+        async def hang(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            await asyncio.sleep(5)
+            raise AssertionError
+
+        async def unreachable(
+            host: str, port: int
+        ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            msg = "no route"
+            raise OSError(msg)
+
+        async def scenario() -> tuple[str, str]:
+            slow = await probe_ports("h", [1], timeout=0.05, opener=hang)
+            broken = await probe_ports("h", [1], timeout=1, opener=unreachable)
+            return slow[0].detail, broken[0].detail
+
+        assert asyncio.run(scenario()) == ("timeout", "no route")
+
+    def test_refused_is_reported_as_such(self) -> None:
+        async def refuse(host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+            raise ConnectionRefusedError
+
+        results = asyncio.run(probe_ports("h", [7000], opener=refuse))
+        assert (results[0].is_open, results[0].detail) == (False, "refused")
+
+    def test_close_errors_are_tolerated(self) -> None:
+        class Writer:
+            def close(self) -> None:
+                return
+
+            async def wait_closed(self) -> None:
+                raise ConnectionResetError
+
+        async def opener(host: str, port: int) -> tuple[asyncio.StreamReader, Writer]:
+            return asyncio.StreamReader(), Writer()
+
+        results = asyncio.run(probe_ports("h", [1], opener=opener))  # type: ignore[arg-type]
+        assert results[0].is_open
+
+    def test_tool_is_recorded(self) -> None:
+        assert "no payload" in PROBE_TOOL

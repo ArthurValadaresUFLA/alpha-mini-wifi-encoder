@@ -18,6 +18,7 @@ from alpha_mini_wifi_encoder.constants import CodeMaoCommand
 from alpha_mini_wifi_encoder.lan import LanTransport
 from alpha_mini_wifi_encoder.lan_discovery import DiscoveryReport, LanRobot, ZeroconfLanScanner
 from alpha_mini_wifi_encoder.network import DetectedNetwork, NetworkDetectionError, Security
+from alpha_mini_wifi_encoder.port_probe import PortResult
 from tests.codemao_helpers import ScriptedTransport, default_responder, envelope
 
 REAL_NETWORK_DETECTOR_FACTORY = cli_program.create_network_detector
@@ -307,6 +308,90 @@ class TestLanScan:
         assert result.exit_code == 0, result.output
         assert scanners.interfaces == [("192.168.0.10", "10.0.0.5")]
         assert "interface: 192.168.0.10, 10.0.0.5" in result.output
+
+
+class TestLanDiag:
+    def probe(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, tuple[int, ...]]]:
+        calls: list[tuple[str, tuple[int, ...]]] = []
+
+        async def fake(host: str, ports: tuple[int, ...]) -> list[PortResult]:
+            calls.append((host, ports))
+            return [PortResult(p, p == 7000, "open" if p == 7000 else "refused") for p in ports]
+
+        monkeypatch.setattr(cli_program, "probe_ports", fake)
+        return calls
+
+    def test_scan_only_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, found())
+        calls = self.probe(monkeypatch)
+        result = CliRunner().invoke(main, ["lan-diag", "--scan-timeout", "1"])
+        assert result.exit_code == 0, result.output
+        assert "robots: 1" in result.output
+        assert calls == []
+
+    def test_tcp_test_after_confirmation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, report())
+        calls = self.probe(monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            ["lan-diag", "--scan-timeout", "1", "--diag-connect", "--host", "10.0.0.2"],
+            input="y\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert calls == [("10.0.0.2", (7000, 8801, 5555))]
+        assert "TCP test: 10.0.0.2 ports 7000, 8801, 5555" in result.output
+        assert "Only the listed ports were tested" in result.output
+
+    def test_custom_ports_and_yes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, report())
+        calls = self.probe(monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            [
+                "lan-diag",
+                "--scan-timeout",
+                "1",
+                "--diag-connect",
+                "--host",
+                "h",
+                "--ports",
+                "7000, 22",
+                "-y",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert calls == [("h", (7000, 22))]
+
+    def test_declined_confirmation_probes_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, report())
+        calls = self.probe(monkeypatch)
+        result = CliRunner().invoke(
+            main,
+            ["lan-diag", "--scan-timeout", "1", "--diag-connect", "--host", "h"],
+            input="n\n",
+        )
+        assert result.exit_code == 1
+        assert calls == []
+
+    def test_host_is_required_for_the_tcp_test(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scanners = Scanners(monkeypatch, report())
+        result = CliRunner().invoke(main, ["lan-diag", "--diag-connect"])
+        assert result.exit_code == 2
+        assert "--host is required" in result.output
+        assert scanners.scans == 0
+
+    @pytest.mark.parametrize("ports", ["abc", "0", "70000", ","])
+    def test_invalid_ports(self, monkeypatch: pytest.MonkeyPatch, ports: str) -> None:
+        Scanners(monkeypatch, report())
+        result = CliRunner().invoke(main, ["lan-diag", "--ports", ports])
+        assert result.exit_code == 2
+        assert "invalid port list" in result.output
+
+    def test_wrong_network_aborts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, report())
+        monkeypatch.setattr(cli_program, "create_network_detector", lambda: FakeDetector("x"))
+        result = CliRunner().invoke(main, ["lan-diag", "--expect-ssid", "demo_neuron"])
+        assert result.exit_code == 1
 
 
 class TestLanEncode:
