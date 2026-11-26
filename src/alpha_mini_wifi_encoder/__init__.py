@@ -41,5 +41,5 @@ __all__ = [
     "WifiProvisioningEncoder",
 ]
 """list[str]: Names re-exported as the package's public API."""
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 """str: Package version, also reported by the command-line ``--version`` option."""
