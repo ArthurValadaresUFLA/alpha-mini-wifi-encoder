@@ -125,12 +125,12 @@ class LanTransport:
         self._connection_factory = connection_factory
         self._codec = CodeMaoCodec.for_lan()
         self._guard = guard or StopGuard()
+        self._handshake_result: LanHandshakeResult | None = None
         self._decoder = FrameStreamDecoder()
         self._inbox: asyncio.Queue[bytes | LanError] = asyncio.Queue()
         self._writer: asyncio.StreamWriter | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._last_write = 0.0
-        self._handshake_result: LanHandshakeResult | None = None
 
     @property
     def codec(self) -> CodeMaoCodec:

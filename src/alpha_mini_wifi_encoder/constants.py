@@ -131,9 +131,9 @@ LAN_MDNS_SERVICE_TYPES: Final[tuple[str, ...]] = (
     "_Mini_mini_channel_server._tcp.local.",
     "_Dedu_mini_channel_server._tcp.local.",
 )
-"""tuple[str, ...]: Canonical mDNS types browsed by default: the app's constants and the
-official SDK's (``RobotType.MINI`` and the DEDU default). The EDU/KOR variants of the SDK are not
-listed because their exact names were not recovered."""
+"""tuple[str, ...]: Canonical mDNS types browsed by default: the app's two constants and the
+types of the official SDK (``RobotType.MINI`` and the DEDU default). The EDU/KOR variants of the
+SDK are not listed because their exact names were not recovered."""
 
 APP_VERSION_NAME: Final[str] = "1.3.2"
 """str: ``clientVersionName`` of the companion app this package mimics."""
