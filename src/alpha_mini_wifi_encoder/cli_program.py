@@ -6,7 +6,8 @@ perform I/O; they can be given test doubles through the injectable factories
 :func:`create_ble_transport`, :func:`create_lan_transport` and :func:`create_lan_scanner`.
 
 Only the three commands recovered from the app are exposed (handshake, start/stop program and
-revert origin). No reset, erase, unbind, factory or ADB command exists in this client.
+revert origin), and :class:`~.stop_guard.StopGuard` refuses anything else. No reset, erase, unbind,
+factory or ADB command exists in this client.
 """
 
 from __future__ import annotations

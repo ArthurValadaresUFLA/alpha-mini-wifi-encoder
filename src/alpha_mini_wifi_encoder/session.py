@@ -33,6 +33,7 @@ from alpha_mini_wifi_encoder.codemao import (
 )
 from alpha_mini_wifi_encoder.constants import LAN_KICKED_COMMAND
 from alpha_mini_wifi_encoder.errors import ChannelKickedError, ReplyTimeoutError
+from alpha_mini_wifi_encoder.stop_guard import StopGuard
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -99,6 +100,7 @@ class CodeMaoSession:
         *,
         reply_timeout: float = DEFAULT_REPLY_TIMEOUT_SECONDS,
         on_event: Callable[[CodeMaoReply], None] | None = None,
+        guard: StopGuard | None = None,
     ) -> None:
         """Create the session; nothing is opened until the context is entered.
 
@@ -107,6 +109,7 @@ class CodeMaoSession:
             reply_timeout (float): Seconds to wait for each reply.
             on_event (Callable[[CodeMaoReply], None] | None): Called with every received
                 message that does not answer the request in flight.
+            guard (StopGuard | None): Stop criteria; the default allow-list otherwise.
 
         Returns:
             None: This method does not return a value.
@@ -114,7 +117,7 @@ class CodeMaoSession:
         self._transport = transport
         self._reply_timeout = reply_timeout
         self._on_event = on_event
-        self._codec = CodeMaoCodec()
+        self._guard = guard or StopGuard()
         self._serials = itertools.count(1)
 
     async def __aenter__(self) -> Self:
@@ -157,8 +160,10 @@ class CodeMaoSession:
 
         Raises:
             ReplyTimeoutError: If no matching reply arrives within the reply timeout.
+            StopConditionError: If the command is outside the guard's allow-list.
             ChannelKickedError: If the robot announces that another client took the channel.
         """
+        self._guard.check_outgoing(request)
         serial = next(self._serials)
         await self._transport.send(self._transport.codec.encode(request, serial))
         try:

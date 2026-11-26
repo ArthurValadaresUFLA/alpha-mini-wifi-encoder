@@ -6,8 +6,7 @@ TCP connection is open, :class:`LanTransport` performs the application handshake
 the pong to the robot's ``0x00`` ping) is written when the writer has been idle for 5 s, and the
 link is dropped after 7 s without any read. Frames carry a checksum byte (``LanFrameLayer``).
 
-Everything here is derived from static analysis: the handshake field numbers, the heartbeat
-payload and the read-timeout behaviour are assumptions that were not validated on hardware.
+Everything here is derived from static analysis of the app and was not validated on hardware.
 There is no TLS or encryption on this channel, as in the app.
 """
 
@@ -41,6 +40,7 @@ from alpha_mini_wifi_encoder.constants import (
 from alpha_mini_wifi_encoder.errors import LanError, ProtocolError
 from alpha_mini_wifi_encoder.frames import FrameStreamDecoder
 from alpha_mini_wifi_encoder.layers import LanFrameLayer
+from alpha_mini_wifi_encoder.stop_guard import StopConditionError, StopGuard
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -97,6 +97,7 @@ class LanTransport:
         read_timeout: float = LAN_READ_TIMEOUT_SECONDS,
         writer_idle: float = LAN_WRITER_IDLE_SECONDS,
         connection_factory: ConnectionFactory = asyncio.open_connection,
+        guard: StopGuard | None = None,
     ) -> None:
         """Create the transport; nothing is opened until :meth:`connect`.
 
@@ -109,6 +110,7 @@ class LanTransport:
             read_timeout (float): Seconds of read silence after which the link is dropped.
             writer_idle (float): Seconds of write silence after which a heartbeat is sent.
             connection_factory (ConnectionFactory): Opens the connection (injectable for tests).
+            guard (StopGuard | None): Stop criteria applied to the handshake response.
 
         Returns:
             None: This method does not return a value.
@@ -122,6 +124,7 @@ class LanTransport:
         self._writer_idle = writer_idle
         self._connection_factory = connection_factory
         self._codec = CodeMaoCodec.for_lan()
+        self._guard = guard or StopGuard()
         self._decoder = FrameStreamDecoder()
         self._inbox: asyncio.Queue[bytes | LanError] = asyncio.Queue()
         self._writer: asyncio.StreamWriter | None = None
@@ -281,6 +284,10 @@ class LanTransport:
             msg = f"unexpected handshake response commandId={reply.command_id}"
             raise LanError(msg)
         self._handshake_result = result
+        try:
+            self._guard.check_handshake(result)
+        except StopConditionError as error:
+            raise LanError(str(error)) from error
 
     async def _read_loop(self, reader: asyncio.StreamReader) -> None:
         """Feed received bytes to the frame decoder until the link fails.

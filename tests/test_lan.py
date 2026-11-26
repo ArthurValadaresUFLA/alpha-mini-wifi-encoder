@@ -10,6 +10,7 @@ from alpha_mini_wifi_encoder.constants import LAN_KICKED_COMMAND
 from alpha_mini_wifi_encoder.errors import ChannelKickedError, LanError
 from alpha_mini_wifi_encoder.frames import FrameStreamDecoder
 from alpha_mini_wifi_encoder.lan import LanIdentity, LanTransport
+from alpha_mini_wifi_encoder.stop_guard import StopGuard
 from alpha_mini_wifi_encoder.session import CodeMaoSession
 from tests.codemao_helpers import default_responder, envelope, frame_of, lan_frame_of, lan_ok
 
@@ -116,6 +117,8 @@ def test_handshake_then_programming_session() -> None:
 @pytest.mark.parametrize(
     ("handshake", "message"),
     [
+        (lan_ok(success=False, code=9), "refused.*resultCode=9"),
+        (lan_ok(error_code=3), "refused.*errorCode=3.*fw-9"),
         (lan_frame_of(envelope(7, b"")), "unexpected handshake response commandId=7"),
         (lan_frame_of(envelope(1000, b"\xff\xff")), "malformed handshake"),
     ],
@@ -356,3 +359,13 @@ def test_handshake_result_is_exposed() -> None:
                 )
 
     assert asyncio.run(scenario()) == (3, "2.0.1", "robot-session")
+
+
+def test_guard_stops_on_unexpected_interface_version() -> None:
+    async def scenario() -> None:
+        async with serve(robot()) as port:
+            guard = StopGuard(expected_interface_version=9)
+            await LanTransport("127.0.0.1", port, guard=guard).connect()
+
+    with pytest.raises(LanError, match="incompatible robot interface version 3"):
+        asyncio.run(scenario())
