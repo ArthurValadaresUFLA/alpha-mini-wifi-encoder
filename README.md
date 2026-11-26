@@ -59,34 +59,53 @@ SSID and security of the current network are detected and mapped to the app's va
 The BSSID is omitted unless `--include-bssid` is given, like the app's native flow. `--ssid`,
 `--cap` and `--bssid` override detected values.
 
-## Programming mode and online operation (v0.2)
+## Programming mode and online operation (v0.3)
 
 Besides Wi-Fi provisioning, the package implements the app's **programming (CodeMao) skill**
 over two transports, based on the analysis report (static analysis only; **not validated on
 hardware**).
 
 ```console
-# Offline: show the exact frame and GATT writes of a command
+# Offline: show the exact frame of a command (BLE shows GATT writes, LAN only the TCP frame)
 alpha-mini-wifi-encode program encode --programme-version 3 --action handshake
-alpha-mini-wifi-encode program encode --programme-version 3 --action start --output json
+alpha-mini-wifi-encode program encode --programme-version 3 --via lan --output json
 
 # BLE: handshake (cmdId 29), then run / stop / revert origin (33 / 33 / 28)
 alpha-mini-wifi-encode scan
 alpha-mini-wifi-encode program run --programme-version 3 --device AA:BB:CC:DD:EE:FF \
     --do start --hold 10
 
-# LAN (robot already online on Wi-Fi): discover via mDNS, then connect over TCP
-alpha-mini-wifi-encode lan-scan
-alpha-mini-wifi-encode program run --programme-version 3 --via lan --host 192.168.0.50 --port 9000
+# LAN (robot already online): inventory first, then connect over TCP
+alpha-mini-wifi-encode lan-scan --expect-ssid <your-ssid>
+alpha-mini-wifi-encode program run --programme-version 3 --via lan --host <ip> --port <port>
 ```
+
+The TCP port comes from mDNS in the app; the code has no default. The only port observed on
+hardware was `7000`, a single data point that is **not** a specification (`8801` of the SDK and
+`5555` of classic ADB were not seen, but the scanned range was not recorded).
+
+### Discovery and diagnosis (read-only)
+
+* `lan-scan` browses **all** known mDNS types in one run: the app's `_services._dns-sd._udp.local.`
+  (a meta-query, expanded into the types it advertises) and `_DEDU_mini_robot_control._tcp.local.`,
+  plus the SDK's `_Mini_mini_channel_server._tcp.local.` and `_Dedu_mini_channel_server._tcp.local.`
+  (the SDK's EDU/KOR variants were not recovered). It prints counters, TXT records and a
+  diagnostic. **An empty result is inconclusive**: it does not prove that mDNS is off.
+* `--expect-ssid` aborts when the machine is on another Wi-Fi network (mDNS is link-local, so a
+  scan from there would be a false negative); `--interface <local-ip>` selects the multicast
+  interface. Without a detectable Wi-Fi it only warns.
+* `lan-diag` adds an optional `--diag-connect --host <ip> [--ports 7000,8801,5555]`: after a
+  confirmation it opens and closes a TCP connection to each listed port. **No byte is sent**, and
+  the report records the tool and the exact ports, because "closed" means nothing without them.
 
 | Layer | Module | Role |
 | --- | --- | --- |
 | Messages | `codemao_messages`, `codemao` | Protobuf bodies, envelope codec, typed results |
-| Framing | `frames` | Incremental `FB BF 01 ... ED` stream decoder |
+| Framing | `layers`, `frames` | `FrameLayer` (BLE tail `01 ED`), `LanFrameLayer` (checksum), stream decoder |
+| Safety | `stop_guard` | Allow-list of commands and handshake stop criteria |
 | Session | `session` | `sendSerial` counter, reply correlation, events, timeouts |
 | BLE | `ble_transport` | Persistent GATT link, 16-byte slices, notification reassembly |
-| LAN | `lan`, `lan_discovery` | TCP + app handshake (0 -> 1000), heartbeat, mDNS scan |
+| LAN | `lan`, `lan_discovery`, `port_probe` | TCP + 7-field handshake (0 -> 1000), heartbeat, mDNS, TCP probe |
 
 ```python
 async with CodeMaoSession(LanTransport(host, port)) as session:
@@ -94,22 +113,40 @@ async with CodeMaoSession(LanTransport(host, port)) as session:
     await session.start_program()
 ```
 
-Safety: only handshake, start/stop program and revert origin are exposed. There is no reset,
-erase, unbind, factory or ADB command (ADB goes through Tencent IM in the app and is out of
-scope), and the LAN handshake uses freshly generated random identifiers, never copied ones.
-`program run` asks for confirmation unless `--yes` is given.
+### Safety
+
+* Only handshake, start/stop program and revert origin can be sent: `StopGuard` refuses every
+  other command id (so no reset, erase, unbind or factory opcode can leave the client), and stops
+  on a refused LAN handshake, a non-zero `errorCode` or an unexpected interface version.
+* **ADB is not implemented.** There are three distinct paths and none is wired here: the app's
+  settings screen sends IM `316` through Tencent IM (cloud, needs the account session); the
+  official SDK sends cmd `7` (`AdbSwitchRequest{open}`) over WebSocket `ws://<ip>:8801`; neither
+  is the LAN CodeMao channel. Cmd `7` enables USB debugging and is not known to open TCP/5555.
+  Any future module would need explicit authorisation and an enforced switch-off.
+* The LAN handshake uses freshly generated random identifiers, never copied ones. `program run`
+  asks for confirmation unless `--yes` is given.
+
+### Wire details taken from the app
+
+* **LAN frame:** `FB BF 01 <len BE> <payload> <checksum> ED` with `checksum = (len + 2) & 0xFF`,
+  where `len` is the length field (`payload + 6`). BLE keeps the constant `01 ED`.
+* **LAN heartbeat:** the robot sends `0x00` (ping, discarded); the client writes `0x01` (pong)
+  when its writer is idle for 5 s; the link drops after 7 s without reads.
+* **LAN handshake:** `BluetoothHandShakeRequest` (7 fields, `clientVersionCode=1030`,
+  `deviceType=1`) answered by `BluetoothShakeResponse` (9 fields, with `errorCode`, versions and
+  `sessionId`, shown by `program run --via lan`).
+* The BLE (`int64`) and LAN (`int32`) message headers encode identically for the small values
+  used here; they are different protocol definitions and are documented as such.
 
 ### Assumptions to verify on hardware
 
-* **Frame checksum byte.** The report states `(len + 2) & 0xFF`, but the existing, byte-exact
-  Wi-Fi encoder (and these commands) write the constant `0x01`. The report's definition of
-  `len` is ambiguous; if the robot rejects frames, start here (`layers.FrameLayer`).
-* **Response field numbers** and the **LAN handshake fields** (`uuid`, `appVersion`, `locale`,
-  `deviceType`, `sessionId`) assume consecutive numbers in the order listed in the report.
+* **CodeMao response field numbers** (the three result triples) assume consecutive numbers in
+  the order of the report; the request layouts and the LAN handshake pair are recovered.
 * **Reply correlation** assumes `responseSerial == sendSerial` (falling back to `commandId`).
-* **LAN heartbeat** payload `0x00` (ping) / `0x01`, the 7 s read timeout and the mDNS service
-  type (`_DEDU_mini_robot_control._tcp.local.`) come from the report, unconfirmed.
+* **Whether the LAN channel accepts the CodeMao commands** (29/33/28): in the app the programming
+  session starts over BLE.
 * **BLE notifications** are assumed to carry the 4-byte trailer (`--raw-notifications` otherwise).
+* `deviceCountry` and `clientLan` defaults (`US`, `en`) are placeholders; set them on `LanIdentity`.
 
 ## Wire format (summary)
 
