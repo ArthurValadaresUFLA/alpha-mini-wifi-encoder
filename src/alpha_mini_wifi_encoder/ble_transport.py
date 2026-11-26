@@ -19,6 +19,7 @@ from bleak import BleakClient
 from bleak.exc import BleakError
 
 from alpha_mini_wifi_encoder.chunking import ChunkingStrategy, TrailerChunker
+from alpha_mini_wifi_encoder.codemao import CodeMaoCodec
 from alpha_mini_wifi_encoder.constants import (
     GATT_CHUNK_TRAILER_SIZE,
     HEARTBEAT_CHARACTERISTIC_UUID,
@@ -75,11 +76,21 @@ class BleTransport:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat_payload = heartbeat_payload
         self._client_factory = client_factory
+        self._codec = CodeMaoCodec()
         self._client: Any = None
         self._decoder = FrameStreamDecoder()
         self._inbox: asyncio.Queue[bytes | BleError] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+
+    @property
+    def codec(self) -> CodeMaoCodec:
+        """Codec for BLE frames (constant ``01 ED`` tail).
+
+        Returns:
+            CodeMaoCodec: The BLE codec.
+        """
+        return self._codec
 
     async def connect(self) -> None:
         """Connect and subscribe to the notify characteristic.

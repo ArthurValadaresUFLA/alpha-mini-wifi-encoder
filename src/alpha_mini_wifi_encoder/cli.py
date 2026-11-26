@@ -29,7 +29,7 @@ from rich.table import Table
 from alpha_mini_wifi_encoder import __version__
 from alpha_mini_wifi_encoder.ble import BleakDeviceScanner, BleakGattWriter, BleDevice
 from alpha_mini_wifi_encoder.chunking import TrailerChunker
-from alpha_mini_wifi_encoder.cli_program import lan_scan, program
+from alpha_mini_wifi_encoder.cli_program import lan_diag, lan_scan, program
 from alpha_mini_wifi_encoder.cli_support import handle_errors
 from alpha_mini_wifi_encoder.constants import MAX_RANDOM_ID, WifiCommand
 from alpha_mini_wifi_encoder.encoder import WifiProvisioningEncoder
@@ -375,6 +375,7 @@ def main() -> None:
 
 main.add_command(program)
 main.add_command(lan_scan)
+main.add_command(lan_diag)
 
 
 # --------------------------------------------------------------------- encode

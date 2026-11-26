@@ -20,6 +20,7 @@ from alpha_mini_wifi_encoder.constants import (
     FRAME_TAIL,
     FRAME_TYPE_SINGLE,
     HEADER_VERSION_CODE,
+    LAN_CHECKSUM_OFFSET,
     MAX_FRAME_LENGTH_FIELD,
     MAX_SEND_SERIAL,
 )
@@ -171,8 +172,37 @@ class FrameLayer:
             + bytes([FRAME_TYPE_SINGLE])
             + length.to_bytes(2, "big")
             + payload
-            + FRAME_TAIL
+            + self._tail(length)
         )
+
+    def _tail(self, length: int) -> bytes:
+        """Return the two closing bytes of the frame.
+
+        Args:
+            length (int): Value of the frame's length field.
+
+        Returns:
+            bytes: The constant BLE tail ``01 ED``.
+        """
+        del length
+        return FRAME_TAIL
+
+
+class LanFrameLayer(FrameLayer):
+    """Layer 4 for TCP: same container, but the byte before ``ED`` is a checksum."""
+
+    name = "Layer 4 - MiniBleProto frame (LAN checksum)"
+
+    def _tail(self, length: int) -> bytes:
+        """Return ``<checksum> ED`` with ``checksum = (length + 2) & 0xFF``.
+
+        Args:
+            length (int): Value of the frame's length field.
+
+        Returns:
+            bytes: The checksum byte followed by the ``0xED`` terminator.
+        """
+        return bytes([(length + LAN_CHECKSUM_OFFSET) & 0xFF, FRAME_TAIL[-1]])
 
 
 def unpack_frame(frame: bytes) -> bytes:

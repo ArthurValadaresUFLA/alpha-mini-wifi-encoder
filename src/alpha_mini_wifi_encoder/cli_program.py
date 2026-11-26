@@ -3,16 +3,19 @@
 The module exports the :func:`program` click group (``encode`` and ``run``) and the
 :func:`lan_scan` command. ``program encode`` is offline. ``program run`` and ``lan-scan``
 perform I/O; they can be given test doubles through the injectable factories
-:func:`create_ble_transport`, :func:`create_lan_transport` and :func:`create_lan_scanner`.
+:func:`create_ble_transport`, :func:`create_lan_transport`, :func:`create_lan_scanner` and
+:func:`create_network_detector`.
 
 Only the three commands recovered from the app are exposed (handshake, start/stop program and
-revert origin). No reset, erase, unbind, factory or ADB command exists in this client.
+revert origin), and :class:`~.stop_guard.StopGuard` refuses anything else. No reset, erase, unbind,
+factory or ADB command exists in this client.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import click
@@ -41,7 +44,9 @@ from alpha_mini_wifi_encoder.constants import (
 from alpha_mini_wifi_encoder.errors import UserAbortedError
 from alpha_mini_wifi_encoder.ids import FixedRandomId
 from alpha_mini_wifi_encoder.lan import LanTransport
-from alpha_mini_wifi_encoder.lan_discovery import LanScanner, ZeroconfLanScanner
+from alpha_mini_wifi_encoder.lan_discovery import DiscoveryReport, LanScanner, ZeroconfLanScanner
+from alpha_mini_wifi_encoder.network import NetworkDetectionError, WifiDetector, create_detector
+from alpha_mini_wifi_encoder.port_probe import DEFAULT_DIAG_PORTS, PROBE_TOOL, probe_ports
 from alpha_mini_wifi_encoder.session import (
     DEFAULT_REPLY_TIMEOUT_SECONDS,
     CodeMaoSession,
@@ -51,21 +56,40 @@ from alpha_mini_wifi_encoder.session import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-_ACTIONS: dict[str, Callable[[CodeMaoSession], Awaitable[CommandResult]]] = {
-    "start": CodeMaoSession.start_program,
-    "stop": CodeMaoSession.stop_program,
-    "revert-origin": CodeMaoSession.revert_origin,
-}
-"""dict[str, Callable]: Registry of the actions ``program run`` can perform after the handshake."""
 
-_ENCODE_REQUESTS: dict[str, Callable[[], CodeMaoRequest]] = {
-    "start": lambda: control_program_request(start=True),
-    "stop": lambda: control_program_request(start=False),
-    "revert-origin": revert_origin_request,
-}
-"""dict[str, Callable]: Builders of the action requests shown by ``program encode``."""
+@dataclass(frozen=True, slots=True)
+class ProgramAction:
+    """One action of ``program run`` / ``program encode``, defined in a single place.
 
-DEFAULT_LAN_PORT_HINT = "port advertised by mDNS (see lan-scan)"
+    Attributes:
+        name (str): Command-line name of the action.
+        builder (Callable[[], CodeMaoRequest]): Builds the request shown by ``program encode``.
+        runner (Callable[[CodeMaoSession], Awaitable[CommandResult]]): Performs the action.
+    """
+
+    name: str
+    builder: Callable[[], CodeMaoRequest]
+    runner: Callable[[CodeMaoSession], Awaitable[CommandResult]]
+
+
+PROGRAM_ACTIONS: dict[str, ProgramAction] = {
+    action.name: action
+    for action in (
+        ProgramAction(
+            "start", lambda: control_program_request(start=True), CodeMaoSession.start_program
+        ),
+        ProgramAction(
+            "stop", lambda: control_program_request(start=False), CodeMaoSession.stop_program
+        ),
+        ProgramAction("revert-origin", revert_origin_request, CodeMaoSession.revert_origin),
+    )
+}
+"""dict[str, ProgramAction]: Registry of the actions that follow the handshake."""
+
+DEFAULT_LAN_PORT_HINT = (
+    "TCP port advertised by mDNS; without it pass --port explicitly "
+    "(7000 is only the one value observed on hardware, not confirmed)"
+)
 """str: Help text for ``--port``; the port is never assumed."""
 
 
@@ -96,13 +120,25 @@ def create_lan_transport(host: str, port: int) -> FrameTransport:
     return LanTransport(host, port)
 
 
-def create_lan_scanner() -> LanScanner:
+def create_lan_scanner(interfaces: tuple[str, ...] = ()) -> LanScanner:
     """Return the mDNS scanner.
+
+    Args:
+        interfaces (tuple[str, ...]): Local addresses to bind multicast to; empty for the default.
 
     Returns:
         LanScanner: A ``zeroconf``-backed scanner.
     """
-    return ZeroconfLanScanner()
+    return ZeroconfLanScanner(interfaces=interfaces)
+
+
+def create_network_detector() -> WifiDetector:
+    """Return the detector of the machine's current Wi-Fi network.
+
+    Returns:
+        WifiDetector: The operating-system detector.
+    """
+    return create_detector()
 
 
 # ------------------------------------------------------------------- helpers
@@ -116,7 +152,7 @@ def _encode_request(
     """Build the request shown by ``program encode``.
 
     Args:
-        action (str): ``"handshake"`` or a key of ``_ENCODE_REQUESTS``.
+        action (str): ``"handshake"`` or a key of ``PROGRAM_ACTIONS``.
         user_id (str): Handshake user id.
         nickname (str): Handshake nickname.
         programme_version (int): Handshake programme version.
@@ -126,7 +162,7 @@ def _encode_request(
     """
     if action == "handshake":
         return handshake_request(user_id, nickname, programme_version)
-    return _ENCODE_REQUESTS[action]()
+    return PROGRAM_ACTIONS[action].builder()
 
 
 def _describe_event(reply: CodeMaoReply) -> str:
@@ -164,7 +200,7 @@ async def _run_session(  # noqa: PLR0913 - mirrors the command options
         user_id (str): Handshake user id.
         nickname (str): Handshake nickname.
         programme_version (int): Handshake programme version.
-        actions (tuple[str, ...]): Keys of ``_ACTIONS`` to perform after the handshake.
+        actions (tuple[str, ...]): Keys of ``PROGRAM_ACTIONS`` to perform after the handshake.
         hold (float): Seconds to keep the session open and print events afterwards.
         reply_timeout (float): Seconds to wait for each reply.
         console (Console): Console receiving unsolicited events.
@@ -183,7 +219,7 @@ async def _run_session(  # noqa: PLR0913 - mirrors the command options
         if not handshake.is_success:
             return outcomes
         for action in actions:
-            result = await _ACTIONS[action](session)
+            result = await PROGRAM_ACTIONS[action].runner(session)
             outcomes.append((action, result))
             if not result.is_success:
                 return outcomes
@@ -232,10 +268,11 @@ def _identity_options(function: Callable[..., None]) -> Callable[..., None]:
 @_identity_options
 @click.option(
     "--action",
-    type=click.Choice(["handshake", *_ENCODE_REQUESTS]),
+    type=click.Choice(["handshake", *PROGRAM_ACTIONS]),
     default="handshake",
     show_default=True,
 )
+@click.option("--via", type=click.Choice(["ble", "lan"]), default="ble", show_default=True)
 @click.option("--send-serial", type=click.IntRange(min=0), default=1, show_default=True)
 @click.option("--random-id", type=click.IntRange(0, MAX_RANDOM_ID), default=0x1234)
 @click.option("--output", "output_format", type=click.Choice(["pretty", "json"]), default="pretty")
@@ -245,6 +282,7 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
     nickname: str,
     programme_version: int,
     action: str,
+    via: str,
     send_serial: int,
     random_id: int,
     output_format: str,
@@ -256,8 +294,9 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
         nickname (str): Handshake nickname.
         programme_version (int): Handshake programme version.
         action (str): Command to encode.
+        via (str): Channel whose framing to show: ``"ble"`` (GATT writes) or ``"lan"`` (TCP).
         send_serial (int): Header ``sendSerial`` value.
-        random_id (int): Chunk random id for the BLE writes.
+        random_id (int): Chunk random id for the BLE writes (ignored with ``--via lan``).
         output_format (str): ``"pretty"`` or ``"json"``.
 
     Returns:
@@ -266,15 +305,18 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
     request = _encode_request(
         action, user_id=user_id, nickname=nickname, programme_version=programme_version
     )
-    frame = CodeMaoCodec.encode(request, send_serial)
-    chunks = TrailerChunker(FixedRandomId(random_id)).split(frame)
+    codec = CodeMaoCodec.for_lan() if via == "lan" else CodeMaoCodec()
+    frame = codec.encode(request, send_serial)
+    # The randomId/serialNo trailer exists only on GATT writes; a TCP stream has no chunks.
+    chunks = TrailerChunker(FixedRandomId(random_id)).split(frame) if via == "ble" else []
     console = Console()
     if output_format == "json":
         document = {
             "commandId": request.command_id,
             "body": request.body.hex(),
             "frame": frame.hex(),
-            "chunks": [chunk.hex() for chunk in chunks],
+            "via": via,
+            "chunks": [chunk.hex() for chunk in chunks] if via == "ble" else None,
         }
         console.print_json(json.dumps(document))
         return
@@ -287,10 +329,15 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
         )
     )
     console.print(Panel(frame.hex(" "), title=f"Frame ({len(frame)} bytes)", expand=False))
-    table = Table("#", "Bytes", "GATT write value", title="GATT writes (BLE only, <= 20 B each)")
-    for serial, chunk in enumerate(chunks, 1):
-        table.add_row(str(serial), str(len(chunk)), chunk.hex(" "))
-    console.print(table)
+    if via == "ble":
+        table = Table(
+            "#", "Bytes", "GATT write value", title="GATT writes (BLE only, <= 20 B each)"
+        )
+        for serial, chunk in enumerate(chunks, 1):
+            table.add_row(str(serial), str(len(chunk)), chunk.hex(" "))
+        console.print(table)
+    else:
+        console.print("[dim]LAN: the frame above is written as-is to the TCP stream.[/dim]")
     console.print("[dim]Offline output only - nothing was sent to any device.[/dim]")
 
 
@@ -303,7 +350,7 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
 @click.option(
     "--do",
     "actions",
-    type=click.Choice(sorted(_ACTIONS)),
+    type=click.Choice(sorted(PROGRAM_ACTIONS)),
     multiple=True,
     help="Action after the handshake; repeatable, executed in the given order.",
 )
@@ -401,6 +448,14 @@ def run_command(  # noqa: PLR0913 - one parameter per CLI option
             console=console,
         )
     )
+    if isinstance(transport, LanTransport) and transport.handshake_result is not None:
+        hello = transport.handshake_result
+        console.print(
+            f"[dim]robot: software={escape(hello.robot_soft_version_name)} "
+            f"firmware={escape(hello.android_firmware_version)} "
+            f"interface={hello.bt_interface_version} errorCode={hello.error_code} "
+            f"sessionId={escape(hello.session_id)}[/dim]"
+        )
     for label, result in outcomes:
         colour = "green" if result.is_success else "red"
         console.print(
@@ -413,22 +468,225 @@ def run_command(  # noqa: PLR0913 - one parameter per CLI option
         raise click.ClickException(msg)
 
 
-@click.command("lan-scan")
-@click.option("--scan-timeout", type=click.FloatRange(min=1), default=5.0, show_default=True)
-@handle_errors
-def lan_scan(scan_timeout: float) -> None:
-    """List robots advertised over mDNS on the local network.
+# ------------------------------------------------------------- scope guard
+def _check_scope(expect_ssid: str | None, console: Console) -> None:
+    """Abort when the machine is not on the expected Wi-Fi network.
+
+    mDNS is link-local (UDP 5353, TTL 1): scanning from another network yields a false negative,
+    so the scan is refused instead of reporting an empty result.
 
     Args:
-        scan_timeout (float): Seconds to browse.
+        expect_ssid (str | None): SSID the robot's network is expected to have.
+        console (Console): Console used for the report and warnings.
+
+    Returns:
+        None: This function does not return a value.
+
+    Raises:
+        click.ClickException: If the current SSID differs from ``expect_ssid``.
+    """
+    try:
+        current = create_network_detector().detect().ssid
+    except NetworkDetectionError as error:
+        console.print(
+            f"[yellow]warning: no active Wi-Fi detected ({escape(str(error))}); the scan is "
+            "limited to the multicast IPv4 available on the selected interface.[/yellow]"
+        )
+        return
+    expected = f" (expected: {escape(expect_ssid)})" if expect_ssid else ""
+    console.print(f"ssid: {escape(current)}{expected}")
+    if expect_ssid and current != expect_ssid:
+        msg = (
+            f"connected to {current!r}, not {expect_ssid!r}. mDNS does not cross networks, so "
+            "scanning from here would give a false negative; join the robot's network first."
+        )
+        raise click.ClickException(msg)
+
+
+def _print_report(report: DiscoveryReport, console: Console) -> None:
+    """Print the discovery counters, the diagnostic and the resolved records.
+
+    Args:
+        report (DiscoveryReport): Result of the scan.
+        console (Console): Console receiving the output.
 
     Returns:
         None: This function does not return a value.
     """
-    console = Console()
-    with console.status(f"Browsing mDNS for {scan_timeout:g}s..."):
-        robots = asyncio.run(create_lan_scanner().scan(scan_timeout))
-    table = Table("Name", "Host", "Port", title="Robots on the LAN")
-    for robot in robots:
-        table.add_row(escape(robot.name), escape(robot.host), str(robot.port))
+    by_type = ", ".join(f"{escape(t)}={n}" for t, n in sorted(report.seen_by_type.items()))
+    console.print(f"types browsed: {len(report.types_browsed)}")
+    console.print(f"types advertised by the meta-query: {len(report.advertised_types)}")
+    console.print(f"records seen: {report.records_seen}" + (f" ({by_type})" if by_type else ""))
+    console.print(f"resolved: {len(report.records)}")
+    console.print(f"robots: {len(report.robots)}")
+    console.print(f"diagnostic: {report.diagnostic}")
+    if report.unresolved:
+        console.print(f"unresolved: {escape(', '.join(report.unresolved))}")
+    table = Table("Name", "Host", "Port", "Type", "TXT", title="Resolved services")
+    for record in report.records:
+        text = ", ".join(f"{k}={v}" for k, v in record.text.items())
+        table.add_row(
+            escape(record.name),
+            escape(record.host),
+            str(record.port),
+            escape(record.service_type),
+            escape(text),
+        )
     console.print(table)
+
+
+def _scan_options(function: Callable[..., None]) -> Callable[..., None]:
+    """Attach the options shared by ``lan-scan`` and ``lan-diag``.
+
+    Args:
+        function (Callable[..., None]): Click callback to decorate.
+
+    Returns:
+        Callable[..., None]: The callback with the options attached.
+    """
+    options = [
+        click.option(
+            "--scan-timeout", type=click.FloatRange(min=1), default=12.0, show_default=True
+        ),
+        click.option(
+            "--expect-ssid", default=None, help="Abort unless connected to this Wi-Fi network."
+        ),
+        click.option(
+            "--interface",
+            "interfaces",
+            multiple=True,
+            help="Local IPv4 address to bind multicast to; repeatable.",
+        ),
+    ]
+    for option in reversed(options):
+        function = option(function)
+    return function
+
+
+def _run_scan(
+    scan_timeout: float, expect_ssid: str | None, interfaces: tuple[str, ...], console: Console
+) -> DiscoveryReport:
+    """Check the scope, then scan and print the report.
+
+    Args:
+        scan_timeout (float): Seconds to browse.
+        expect_ssid (str | None): Expected SSID, if any.
+        interfaces (tuple[str, ...]): Local addresses to bind to.
+        console (Console): Console receiving the output.
+
+    Returns:
+        DiscoveryReport: The scan result.
+    """
+    _check_scope(expect_ssid, console)
+    if interfaces:
+        console.print(f"interface: {escape(', '.join(interfaces))}")
+    with console.status(f"Browsing mDNS for {scan_timeout:g}s..."):
+        report = asyncio.run(create_lan_scanner(interfaces).scan(scan_timeout))
+    _print_report(report, console)
+    return report
+
+
+@click.command("lan-scan")
+@_scan_options
+@handle_errors
+def lan_scan(scan_timeout: float, expect_ssid: str | None, interfaces: tuple[str, ...]) -> None:
+    """List robots advertised over mDNS (all known service types, with a diagnostic).
+
+    An empty result is inconclusive: it does not prove that the robot has mDNS disabled.
+
+    Args:
+        scan_timeout (float): Seconds to browse.
+        expect_ssid (str | None): Abort unless connected to this network.
+        interfaces (tuple[str, ...]): Local addresses to bind multicast to.
+
+    Returns:
+        None: This function does not return a value.
+    """
+    _run_scan(scan_timeout, expect_ssid, interfaces, Console())
+
+
+def _parse_ports(raw: str) -> tuple[int, ...]:
+    """Parse a comma-separated port list.
+
+    Args:
+        raw (str): Text such as ``"7000,8801"``.
+
+    Returns:
+        tuple[int, ...]: The ports, in order.
+
+    Raises:
+        click.BadParameter: If an entry is not a port number.
+    """
+    try:
+        ports = tuple(int(part) for part in raw.split(",") if part.strip())
+    except ValueError as error:
+        msg = f"invalid port list: {raw!r}"
+        raise click.BadParameter(msg) from error
+    if not ports or any(not 0 < port < 65536 for port in ports):  # noqa: PLR2004
+        msg = f"invalid port list: {raw!r}"
+        raise click.BadParameter(msg)
+    return ports
+
+
+@click.command("lan-diag")
+@_scan_options
+@click.option("--host", default=None, help="With --diag-connect: robot IP to test.")
+@click.option(
+    "--ports",
+    default=",".join(str(p) for p in DEFAULT_DIAG_PORTS),
+    show_default=True,
+    help="With --diag-connect: ports to test.",
+)
+@click.option("--diag-connect", is_flag=True, help="Also test TCP reachability (sends no bytes).")
+@click.option("--yes", "-y", "assume_yes", is_flag=True, help="Do not ask for confirmation.")
+@handle_errors
+def lan_diag(  # noqa: PLR0913 - one parameter per CLI option
+    scan_timeout: float,
+    expect_ssid: str | None,
+    interfaces: tuple[str, ...],
+    host: str | None,
+    ports: str,
+    diag_connect: bool,  # noqa: FBT001
+    assume_yes: bool,  # noqa: FBT001
+) -> None:
+    """Passive LAN diagnosis: mDNS inventory and, on request, TCP reachability.
+
+    No protocol byte is ever written: the TCP test opens and closes the connection.
+
+    Args:
+        scan_timeout (float): Seconds to browse.
+        expect_ssid (str | None): Abort unless connected to this network.
+        interfaces (tuple[str, ...]): Local addresses to bind multicast to.
+        host (str | None): Robot IP for the TCP test.
+        ports (str): Comma-separated ports for the TCP test.
+        diag_connect (bool): Whether to run the TCP test.
+        assume_yes (bool): Skip the confirmation prompt.
+
+    Returns:
+        None: This function does not return a value.
+
+    Raises:
+        click.UsageError: If ``--diag-connect`` is used without ``--host``.
+        UserAbortedError: If the confirmation is declined (translated to an abort).
+    """
+    console = Console()
+    port_list = _parse_ports(ports)
+    if diag_connect and host is None:
+        msg = "--host is required with --diag-connect"
+        raise click.UsageError(msg)
+    _run_scan(scan_timeout, expect_ssid, interfaces, console)
+    if not diag_connect or host is None:
+        return
+    console.print(
+        f"TCP test: {escape(host)} ports {', '.join(map(str, port_list))} via {PROBE_TOOL}"
+    )
+    if not assume_yes and not click.confirm("Open and close a TCP connection to each port?"):
+        raise UserAbortedError
+    results = asyncio.run(probe_ports(host, port_list))
+    table = Table("Port", "Open", "Detail", title=f"TCP reachability ({PROBE_TOOL})")
+    for result in results:
+        table.add_row(str(result.port), "yes" if result.is_open else "no", escape(result.detail))
+    console.print(table)
+    console.print(
+        "[dim]Only the listed ports were tested; 'no' says nothing about other ports.[/dim]"
+    )

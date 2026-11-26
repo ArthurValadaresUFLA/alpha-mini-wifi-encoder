@@ -111,14 +111,38 @@ LAN_READ_TIMEOUT_SECONDS: Final[float] = 7.0
 LAN_WRITER_IDLE_SECONDS: Final[float] = 5.0
 """float: Seconds of write silence after which the app emits a heartbeat."""
 
-LAN_HEARTBEAT_PING: Final[bytes] = b"\x00"
-"""bytes: Heartbeat payload sent when the LAN writer is idle (assumed, see the report)."""
+LAN_HEARTBEAT_INBOUND_PING: Final[bytes] = b"\x00"
+"""bytes: Heartbeat payload the robot sends; the client discards it (``HeartbeatHandler``)."""
 
-LAN_HEARTBEAT_PAYLOADS: Final[frozenset[bytes]] = frozenset({b"\x00", b"\x01"})
+LAN_HEARTBEAT_OUTBOUND_PONG: Final[bytes] = b"\x01"
+"""bytes: Heartbeat payload the client writes whenever its writer has been idle."""
+
+LAN_HEARTBEAT_PAYLOADS: Final[frozenset[bytes]] = frozenset(
+    {LAN_HEARTBEAT_INBOUND_PING, LAN_HEARTBEAT_OUTBOUND_PONG},
+)
 """frozenset[bytes]: Frame payloads treated as heartbeats and never delivered to sessions."""
 
-LAN_MDNS_SERVICE_TYPE: Final[str] = "DEDU_mini_robot_control._tcp.local."
-"""str: mDNS service type constant found in the app (normalised with a ``_`` prefix on use)."""
+LAN_MDNS_META_QUERY: Final[str] = "_services._dns-sd._udp.local."
+"""str: DNS-SD meta-query; its answers are service *types*, not robots (``LanScanConfig``)."""
+
+LAN_MDNS_SERVICE_TYPES: Final[tuple[str, ...]] = (
+    LAN_MDNS_META_QUERY,
+    "_DEDU_mini_robot_control._tcp.local.",
+    "_Mini_mini_channel_server._tcp.local.",
+    "_Dedu_mini_channel_server._tcp.local.",
+)
+"""tuple[str, ...]: Canonical mDNS types browsed by default: the app's constants and the
+official SDK's (``RobotType.MINI`` and the DEDU default). The EDU/KOR variants of the SDK are not
+listed because their exact names were not recovered."""
 
 APP_VERSION_NAME: Final[str] = "1.3.2"
-"""str: Version of the companion app this package mimics in the LAN handshake."""
+"""str: ``clientVersionName`` of the companion app this package mimics."""
+
+APP_VERSION_CODE: Final[int] = 1030
+"""int: ``clientVersionCode`` of the analysed build."""
+
+DEVICE_TYPE_ANDROID_MOBILE: Final[int] = 1
+"""int: ``deviceType`` value ``ANDROID_MOBILE`` of the LAN handshake."""
+
+LAN_CHECKSUM_OFFSET: Final[int] = 2
+"""int: Value added to the frame length field to obtain the LAN checksum byte."""

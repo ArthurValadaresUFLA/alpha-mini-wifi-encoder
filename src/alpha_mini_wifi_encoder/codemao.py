@@ -6,8 +6,10 @@ origin ``28``). :class:`CodeMaoCodec` wraps a request in the shared envelope and
 decodes received frame contents into :class:`CodeMaoReply`. The ``parse_*`` functions turn a
 reply body into :class:`CommandResult` or :class:`HandShakeResult`.
 
-The same envelope and framing are used on BLE and on the LAN channel, so this module is
-transport-agnostic.
+The same envelope is used on BLE and on the LAN channel; this module is transport-agnostic.
+Note that ``protobuf_messages.MessageHeader`` declares the BLE serials as ``int64`` while the LAN
+stack uses ``int32``: for the small values used here the varint encoding is identical, but the
+two headers are distinct protocol definitions and must not be merged silently.
 """
 
 from __future__ import annotations
@@ -22,12 +24,13 @@ from alpha_mini_wifi_encoder.codemao_messages import (
     ControlRunningProgramResponse,
     HandShakeRequest,
     HandShakeResponse,
+    LanHandshakeResponse,
     RevertOriginRequest,
     RevertOriginResponse,
 )
 from alpha_mini_wifi_encoder.constants import CODEMAO_HEADER_VERSION, CodeMaoCommand
 from alpha_mini_wifi_encoder.errors import ProtocolError
-from alpha_mini_wifi_encoder.layers import EncodingPipeline, FrameLayer, MessageLayer
+from alpha_mini_wifi_encoder.layers import EncodingPipeline, FrameLayer, LanFrameLayer, MessageLayer
 from alpha_mini_wifi_encoder.protobuf_messages import EnvelopeMessage
 
 if TYPE_CHECKING:
@@ -100,6 +103,33 @@ class HandShakeResult(CommandResult):
     user_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class LanHandshakeResult:
+    """Outcome of the LAN handshake (``BluetoothShakeResponse``).
+
+    Attributes:
+        is_success (bool): ``isSuccess`` flag.
+        result_code (int): Robot-defined ``resultCode``.
+        error_code (int): ``errorCode``; non-zero values explain a refusal.
+        session_id (str): ``sessionId`` returned by the robot.
+        sys_lan (str): Robot system language.
+        sys_country (str): Robot system country.
+        robot_soft_version_name (str): Robot software version.
+        bt_interface_version (int): Version of the robot's Bluetooth/LAN interface.
+        android_firmware_version (str): Android firmware version of the robot.
+    """
+
+    is_success: bool
+    result_code: int
+    error_code: int
+    session_id: str
+    sys_lan: str
+    sys_country: str
+    robot_soft_version_name: str
+    bt_interface_version: int
+    android_firmware_version: str
+
+
 def handshake_request(user_id: str, nickname: str, programme_version: int) -> CodeMaoRequest:
     """Build the request that starts the programming skill (``cmdId`` 29).
 
@@ -143,10 +173,33 @@ def revert_origin_request() -> CodeMaoRequest:
 
 
 class CodeMaoCodec:
-    """Encode requests into frames and decode frame contents into replies."""
+    """Encode requests into frames and decode frame contents into replies.
 
-    @staticmethod
-    def encode(request: CodeMaoRequest, send_serial: int) -> bytes:
+    The envelope is shared by both channels; only the frame's closing bytes differ, so the codec
+    is parameterised by the frame layer: the BLE tail ``01 ED`` or the LAN checksum.
+    """
+
+    def __init__(self, frame_layer: FrameLayer | None = None) -> None:
+        """Create a codec.
+
+        Args:
+            frame_layer (FrameLayer | None): Frame layer closing the packets; BLE by default.
+
+        Returns:
+            None: This method does not return a value.
+        """
+        self._frame_layer = frame_layer or FrameLayer()
+
+    @classmethod
+    def for_lan(cls) -> CodeMaoCodec:
+        """Create the codec for the TCP channel, whose frames carry a checksum byte.
+
+        Returns:
+            CodeMaoCodec: A codec using :class:`~.layers.LanFrameLayer`.
+        """
+        return cls(LanFrameLayer())
+
+    def encode(self, request: CodeMaoRequest, send_serial: int) -> bytes:
         """Wrap ``request`` in the envelope and in a ``MiniBleProto`` frame.
 
         Args:
@@ -154,7 +207,7 @@ class CodeMaoCodec:
             send_serial (int): Header ``sendSerial`` for this message.
 
         Returns:
-            bytes: Complete frame, ``FB BF 01 <len BE> <envelope> 01 ED``.
+            bytes: Complete frame, ``FB BF 01 <len BE> <envelope> <tail>``.
         """
         pipeline = EncodingPipeline(
             (
@@ -163,7 +216,7 @@ class CodeMaoCodec:
                     command_id=request.command_id,
                     header_version=request.version,
                 ),
-                FrameLayer(),
+                self._frame_layer,
             ),
         )
         return pipeline.run(request.body)[-1].data
@@ -273,4 +326,30 @@ def parse_handshake_result(body: bytes) -> HandShakeResult:
         robot_programme_version=parsed.robotProgrammeVersion,
         nickname=parsed.nickName,
         user_id=parsed.userId,
+    )
+
+
+def parse_lan_handshake_result(body: bytes) -> LanHandshakeResult:
+    """Parse the LAN ``BluetoothShakeResponse``.
+
+    Args:
+        body (bytes): Serialised response.
+
+    Returns:
+        LanHandshakeResult: The decoded outcome with the robot's versions and error code.
+
+    Raises:
+        ProtocolError: If ``body`` cannot be decoded.
+    """
+    parsed = _parse(LanHandshakeResponse, body)
+    return LanHandshakeResult(
+        is_success=parsed.isSuccess,
+        result_code=parsed.resultCode,
+        error_code=parsed.errorCode,
+        session_id=parsed.sessionId,
+        sys_lan=parsed.sysLan,
+        sys_country=parsed.sysCountry,
+        robot_soft_version_name=parsed.robotSoftVersionName,
+        bt_interface_version=parsed.btInterfaceVersion,
+        android_firmware_version=parsed.androidFirmwareVersion,
     )

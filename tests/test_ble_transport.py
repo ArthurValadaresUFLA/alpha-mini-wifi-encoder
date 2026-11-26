@@ -107,7 +107,7 @@ def test_session_over_fake_ble_link() -> None:
     assert not fake.connected
     writes = [data for uuid, data in fake.writes if uuid == WRITE_CHARACTERISTIC_UUID]
     assert all(len(data) <= 20 for data in writes)
-    first_frame = CodeMaoCodec.encode(handshake_request("u", "n", 1), 1)
+    first_frame = CodeMaoCodec().encode(handshake_request("u", "n", 1), 1)
     assert reassemble(tuple(writes[:2])) == first_frame[:32]
 
 
@@ -231,6 +231,7 @@ def test_heartbeat_task_ends_when_client_is_gone() -> None:
         await transport.connect()
         task = transport._heartbeat_task
         assert task is not None
+        await asyncio.sleep(0)  # let the loop reach its first sleep
         transport._client = None
         await asyncio.wait_for(task, 1)
         await transport.close()

@@ -2,11 +2,11 @@
 
 The companion app runs this stack on Netty; here it is a small :mod:`asyncio` client. After the
 TCP connection is open, :class:`LanTransport` performs the application handshake (``commandId``
-0 answered by ``commandId`` 1000 within 15 s), then keeps the link alive: a heartbeat is written
-when the writer has been idle for 5 s, and the link is dropped after 7 s without any read.
+0 answered by ``commandId`` 1000 within 15 s), then keeps the link alive: a heartbeat (``0x01``,
+the pong to the robot's ``0x00`` ping) is written when the writer has been idle for 5 s, and the
+link is dropped after 7 s without any read. Frames carry a checksum byte (``LanFrameLayer``).
 
-Everything here is derived from static analysis: the handshake field numbers, the heartbeat
-payload and the read-timeout behaviour are assumptions that were not validated on hardware.
+Everything here is derived from static analysis of the app and was not validated on hardware.
 There is no TLS or encryption on this channel, as in the app.
 """
 
@@ -18,21 +18,29 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
 
-from alpha_mini_wifi_encoder.codemao import CodeMaoCodec, CodeMaoRequest, parse_result
-from alpha_mini_wifi_encoder.codemao_messages import LanHandshakeRequest, LanHandshakeResponse
+from alpha_mini_wifi_encoder.codemao import (
+    CodeMaoCodec,
+    CodeMaoRequest,
+    LanHandshakeResult,
+    parse_lan_handshake_result,
+)
+from alpha_mini_wifi_encoder.codemao_messages import LanHandshakeRequest
 from alpha_mini_wifi_encoder.constants import (
+    APP_VERSION_CODE,
     APP_VERSION_NAME,
+    DEVICE_TYPE_ANDROID_MOBILE,
     LAN_HANDSHAKE_REQUEST_COMMAND,
     LAN_HANDSHAKE_RESPONSE_COMMAND,
     LAN_HANDSHAKE_TIMEOUT_SECONDS,
+    LAN_HEARTBEAT_OUTBOUND_PONG,
     LAN_HEARTBEAT_PAYLOADS,
-    LAN_HEARTBEAT_PING,
     LAN_READ_TIMEOUT_SECONDS,
     LAN_WRITER_IDLE_SECONDS,
 )
 from alpha_mini_wifi_encoder.errors import LanError, ProtocolError
 from alpha_mini_wifi_encoder.frames import FrameStreamDecoder
-from alpha_mini_wifi_encoder.layers import FrameLayer
+from alpha_mini_wifi_encoder.layers import LanFrameLayer
+from alpha_mini_wifi_encoder.stop_guard import StopConditionError, StopGuard
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -58,17 +66,21 @@ class LanIdentity:
 
     Attributes:
         uuid (str): Client identifier; stable per installation in the app.
-        app_version (str): Version string of the companion app being mimicked.
-        locale (str): Locale tag, e.g. ``"en"``.
-        device_type (str): Client platform label (assumed ``"android"``).
         session_id (str): Identifier of this connection attempt.
+        client_lan (str): Client language tag, e.g. ``"en"`` (``clientLan``).
+        client_version_name (str): Version name of the companion app being mimicked.
+        client_version_code (int): Version code of that app build (1030).
+        device_country (str): Client country code (``deviceCountry``); a placeholder default.
+        device_type (int): ``deviceType``; ``1`` is ``ANDROID_MOBILE``.
     """
 
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
-    app_version: str = APP_VERSION_NAME
-    locale: str = "en"
-    device_type: str = "android"
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    client_lan: str = "en"
+    client_version_name: str = APP_VERSION_NAME
+    client_version_code: int = APP_VERSION_CODE
+    device_country: str = "US"
+    device_type: int = DEVICE_TYPE_ANDROID_MOBILE
 
 
 class LanTransport:
@@ -85,6 +97,7 @@ class LanTransport:
         read_timeout: float = LAN_READ_TIMEOUT_SECONDS,
         writer_idle: float = LAN_WRITER_IDLE_SECONDS,
         connection_factory: ConnectionFactory = asyncio.open_connection,
+        guard: StopGuard | None = None,
     ) -> None:
         """Create the transport; nothing is opened until :meth:`connect`.
 
@@ -97,6 +110,7 @@ class LanTransport:
             read_timeout (float): Seconds of read silence after which the link is dropped.
             writer_idle (float): Seconds of write silence after which a heartbeat is sent.
             connection_factory (ConnectionFactory): Opens the connection (injectable for tests).
+            guard (StopGuard | None): Stop criteria applied to the handshake response.
 
         Returns:
             None: This method does not return a value.
@@ -109,12 +123,32 @@ class LanTransport:
         self._read_timeout = read_timeout
         self._writer_idle = writer_idle
         self._connection_factory = connection_factory
-        self._codec = CodeMaoCodec()
+        self._codec = CodeMaoCodec.for_lan()
+        self._guard = guard or StopGuard()
         self._decoder = FrameStreamDecoder()
         self._inbox: asyncio.Queue[bytes | LanError] = asyncio.Queue()
         self._writer: asyncio.StreamWriter | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._last_write = 0.0
+        self._handshake_result: LanHandshakeResult | None = None
+
+    @property
+    def codec(self) -> CodeMaoCodec:
+        """Codec for LAN frames (checksum byte before ``ED``).
+
+        Returns:
+            CodeMaoCodec: The LAN codec.
+        """
+        return self._codec
+
+    @property
+    def handshake_result(self) -> LanHandshakeResult | None:
+        """Return the robot's handshake answer once connected.
+
+        Returns:
+            LanHandshakeResult | None: The decoded response, or ``None`` before :meth:`connect`.
+        """
+        return self._handshake_result
 
     async def connect(self) -> None:
         """Open the TCP connection, run the application handshake and start the heartbeat.
@@ -226,30 +260,34 @@ class LanTransport:
         """
         identity = self._identity
         body = LanHandshakeRequest(
-            uuid=identity.uuid,
-            appVersion=identity.app_version,
-            locale=identity.locale,
+            clientLan=identity.client_lan,
+            clientVersionName=identity.client_version_name,
+            clientVersionCode=identity.client_version_code,
+            deviceCountry=identity.device_country,
             deviceType=identity.device_type,
+            uuid=identity.uuid,
             sessionId=identity.session_id,
         ).SerializeToString(deterministic=True)
         request = CodeMaoRequest(LAN_HANDSHAKE_REQUEST_COMMAND, body)
         await self.send(self._codec.encode(request, _HANDSHAKE_SERIAL))
         try:
             async with asyncio.timeout(self._handshake_timeout):
-                reply = self._codec.decode(await self.receive())
-            result = parse_result(reply.body, LanHandshakeResponse)
+                reply = CodeMaoCodec.decode(await self.receive())
+            result = parse_lan_handshake_result(reply.body)
         except TimeoutError as error:
             msg = f"no handshake response within {self._handshake_timeout:g}s"
             raise LanError(msg) from error
         except ProtocolError as error:
             msg = f"malformed handshake response: {error}"
             raise LanError(msg) from error
-        if reply.command_id != LAN_HANDSHAKE_RESPONSE_COMMAND or not result.is_success:
-            msg = (
-                f"handshake refused (commandId={reply.command_id}, "
-                f"resultCode={result.result_code}, message={result.message!r})"
-            )
+        if reply.command_id != LAN_HANDSHAKE_RESPONSE_COMMAND:
+            msg = f"unexpected handshake response commandId={reply.command_id}"
             raise LanError(msg)
+        self._handshake_result = result
+        try:
+            self._guard.check_handshake(result)
+        except StopConditionError as error:
+            raise LanError(str(error)) from error
 
     async def _read_loop(self, reader: asyncio.StreamReader) -> None:
         """Feed received bytes to the frame decoder until the link fails.
@@ -283,7 +321,7 @@ class LanTransport:
         Returns:
             None: This method does not return a value.
         """
-        frame = FrameLayer().encode(LAN_HEARTBEAT_PING)
+        frame = LanFrameLayer().encode(LAN_HEARTBEAT_OUTBOUND_PONG)
         loop = asyncio.get_running_loop()
         while True:
             remaining = self._writer_idle - (loop.time() - self._last_write)

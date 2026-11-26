@@ -10,8 +10,9 @@ from alpha_mini_wifi_encoder.constants import LAN_KICKED_COMMAND
 from alpha_mini_wifi_encoder.errors import ChannelKickedError, LanError
 from alpha_mini_wifi_encoder.frames import FrameStreamDecoder
 from alpha_mini_wifi_encoder.lan import LanIdentity, LanTransport
+from alpha_mini_wifi_encoder.stop_guard import StopGuard
 from alpha_mini_wifi_encoder.session import CodeMaoSession
-from tests.codemao_helpers import default_responder, envelope, frame_of, lan_ok
+from tests.codemao_helpers import default_responder, envelope, frame_of, lan_frame_of, lan_ok
 
 Handler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 
@@ -67,7 +68,7 @@ def robot(
                 if log is not None:
                     log.append(request)
                 for content in responder(request):
-                    writer.write(frame_of(content))
+                    writer.write(lan_frame_of(content))
                 await writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError):
             return
@@ -79,7 +80,8 @@ def test_identity_defaults_are_fresh_and_overridable() -> None:
     first, second = LanIdentity(), LanIdentity()
     assert first.uuid != second.uuid
     assert first.session_id != second.session_id
-    assert first.app_version == "1.3.2"
+    assert (first.client_version_name, first.client_version_code) == ("1.3.2", 1030)
+    assert first.device_type == 1
     assert LanIdentity(uuid="u").uuid == "u"
 
 
@@ -88,7 +90,7 @@ def test_handshake_then_programming_session() -> None:
 
     async def scenario() -> list[bool]:
         async with serve(robot(log=log)) as port:
-            identity = LanIdentity(uuid="U", session_id="S", locale="pt-BR")
+            identity = LanIdentity(uuid="U", session_id="S", client_lan="pt", device_country="BR")
             transport = LanTransport("127.0.0.1", port, identity=identity)
             async with CodeMaoSession(transport) as session:
                 handshake = await session.handshake("1", "n", 2)
@@ -99,12 +101,16 @@ def test_handshake_then_programming_session() -> None:
     hello = log[0]
     assert (hello.command_id, hello.send_serial) == (0, 0)
     body = LanHandshakeRequest.FromString(hello.body)
-    assert (body.uuid, body.sessionId, body.locale, body.appVersion) == (  # type: ignore[attr-defined]
-        "U",
-        "S",
-        "pt-BR",
-        "1.3.2",
+    fields = (
+        body.clientLan,  # type: ignore[attr-defined]
+        body.clientVersionName,  # type: ignore[attr-defined]
+        body.clientVersionCode,  # type: ignore[attr-defined]
+        body.deviceCountry,  # type: ignore[attr-defined]
+        body.deviceType,  # type: ignore[attr-defined]
+        body.uuid,  # type: ignore[attr-defined]
+        body.sessionId,  # type: ignore[attr-defined]
     )
+    assert fields == ("pt", "1.3.2", 1030, "BR", 1, "U", "S")
     assert [r.command_id for r in log[1:]] == [29, 33]
 
 
@@ -112,8 +118,9 @@ def test_handshake_then_programming_session() -> None:
     ("handshake", "message"),
     [
         (lan_ok(success=False, code=9), "refused.*resultCode=9"),
-        (frame_of(envelope(7, b"")), "refused.*commandId=7"),
-        (frame_of(envelope(1000, b"\xff\xff")), "malformed handshake"),
+        (lan_ok(error_code=3), "refused.*errorCode=3.*fw-9"),
+        (lan_frame_of(envelope(7, b"")), "unexpected handshake response commandId=7"),
+        (lan_frame_of(envelope(1000, b"\xff\xff")), "malformed handshake"),
     ],
 )
 def test_handshake_refusals(handshake: bytes, message: str) -> None:
@@ -183,7 +190,9 @@ def test_heartbeats_are_sent_when_idle_and_received_ones_are_filtered() -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         decoder = FrameStreamDecoder()
         await read_frame(reader, decoder)
-        writer.write(lan_ok() + frame_of(b"\x01") + frame_of(b"\x00") + frame_of(envelope(55)))
+        writer.write(
+            lan_ok() + lan_frame_of(b"\x00") + lan_frame_of(b"\x01") + lan_frame_of(envelope(55))
+        )
         await writer.drain()
         while True:
             seen.append(await read_frame(reader, decoder))
@@ -198,12 +207,12 @@ def test_heartbeats_are_sent_when_idle_and_received_ones_are_filtered() -> None:
 
     assert asyncio.run(scenario()) == envelope(55)
     assert seen
-    assert set(seen) == {b"\x00"}
+    assert set(seen) == {b"\x01"}  # the client answers with pong, never with ping
 
 
 def test_kicked_surfaces_through_the_session() -> None:
     async def scenario() -> None:
-        kicked = frame_of(envelope(LAN_KICKED_COMMAND))
+        kicked = lan_frame_of(envelope(LAN_KICKED_COMMAND))
         async with serve(robot(extra=kicked)) as port:
             transport = LanTransport("127.0.0.1", port, writer_idle=10)
             async with CodeMaoSession(transport, reply_timeout=1) as session:
@@ -301,3 +310,62 @@ def test_read_error_is_reported() -> None:
             await transport.connect()
 
     asyncio.run(scenario())
+
+
+def test_close_without_connection_is_a_no_op() -> None:
+    async def scenario() -> None:
+        transport = LanTransport("127.0.0.1", 1)
+        await transport.close()
+        await transport.close()
+
+    asyncio.run(scenario())
+
+
+def test_client_frames_carry_the_lan_checksum() -> None:
+    raw: list[bytes] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw.append(await reader.read(4096))  # the handshake, as one TCP read
+        writer.write(lan_ok())
+        await writer.drain()
+        raw.append(await reader.read(4096))  # the first heartbeat
+
+    async def scenario() -> None:
+        async with serve(handler) as port:
+            transport = LanTransport("127.0.0.1", port, writer_idle=0.02, read_timeout=5)
+            async with transport:
+                await asyncio.sleep(0.1)
+
+    asyncio.run(scenario())
+    handshake, heartbeat = raw[0], raw[1]
+    length = int.from_bytes(handshake[3:5], "big")
+    assert handshake[length - 1] == (length + 2) & 0xFF
+    assert handshake[length] == 0xED
+    assert heartbeat.startswith(bytes.fromhex("fbbf0100070109ed"))  # pong 0x01, checksum 9
+
+
+def test_handshake_result_is_exposed() -> None:
+    async def scenario() -> tuple[int, str, str]:
+        async with serve(robot()) as port:
+            transport = LanTransport("127.0.0.1", port, writer_idle=10)
+            assert (initial := transport.handshake_result) is None, initial
+            async with transport:
+                result = transport.handshake_result
+                assert result is not None
+                return (
+                    result.bt_interface_version,
+                    result.robot_soft_version_name,
+                    result.session_id,
+                )
+
+    assert asyncio.run(scenario()) == (3, "2.0.1", "robot-session")
+
+
+def test_guard_stops_on_unexpected_interface_version() -> None:
+    async def scenario() -> None:
+        async with serve(robot()) as port:
+            guard = StopGuard(expected_interface_version=9)
+            await LanTransport("127.0.0.1", port, guard=guard).connect()
+
+    with pytest.raises(LanError, match="incompatible robot interface version 3"):
+        asyncio.run(scenario())
