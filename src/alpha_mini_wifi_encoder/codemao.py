@@ -24,6 +24,7 @@ from alpha_mini_wifi_encoder.codemao_messages import (
     ControlRunningProgramResponse,
     HandShakeRequest,
     HandShakeResponse,
+    LanHandshakeResponse,
     RevertOriginRequest,
     RevertOriginResponse,
 )
@@ -100,6 +101,33 @@ class HandShakeResult(CommandResult):
     robot_programme_version: int
     nickname: str
     user_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class LanHandshakeResult:
+    """Outcome of the LAN handshake (``BluetoothShakeResponse``).
+
+    Attributes:
+        is_success (bool): ``isSuccess`` flag.
+        result_code (int): Robot-defined ``resultCode``.
+        error_code (int): ``errorCode``; non-zero values explain a refusal.
+        session_id (str): ``sessionId`` returned by the robot.
+        sys_lan (str): Robot system language.
+        sys_country (str): Robot system country.
+        robot_soft_version_name (str): Robot software version.
+        bt_interface_version (int): Version of the robot's Bluetooth/LAN interface.
+        android_firmware_version (str): Android firmware version of the robot.
+    """
+
+    is_success: bool
+    result_code: int
+    error_code: int
+    session_id: str
+    sys_lan: str
+    sys_country: str
+    robot_soft_version_name: str
+    bt_interface_version: int
+    android_firmware_version: str
 
 
 def handshake_request(user_id: str, nickname: str, programme_version: int) -> CodeMaoRequest:
@@ -298,4 +326,30 @@ def parse_handshake_result(body: bytes) -> HandShakeResult:
         robot_programme_version=parsed.robotProgrammeVersion,
         nickname=parsed.nickName,
         user_id=parsed.userId,
+    )
+
+
+def parse_lan_handshake_result(body: bytes) -> LanHandshakeResult:
+    """Parse the LAN ``BluetoothShakeResponse``.
+
+    Args:
+        body (bytes): Serialised response.
+
+    Returns:
+        LanHandshakeResult: The decoded outcome with the robot's versions and error code.
+
+    Raises:
+        ProtocolError: If ``body`` cannot be decoded.
+    """
+    parsed = _parse(LanHandshakeResponse, body)
+    return LanHandshakeResult(
+        is_success=parsed.isSuccess,
+        result_code=parsed.resultCode,
+        error_code=parsed.errorCode,
+        session_id=parsed.sessionId,
+        sys_lan=parsed.sysLan,
+        sys_country=parsed.sysCountry,
+        robot_soft_version_name=parsed.robotSoftVersionName,
+        bt_interface_version=parsed.btInterfaceVersion,
+        android_firmware_version=parsed.androidFirmwareVersion,
     )

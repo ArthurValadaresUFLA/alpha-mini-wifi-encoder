@@ -126,7 +126,13 @@ LAN_MDNS_SERVICE_TYPE: Final[str] = "DEDU_mini_robot_control._tcp.local."
 """str: mDNS service type constant found in the app (normalised with a ``_`` prefix on use)."""
 
 APP_VERSION_NAME: Final[str] = "1.3.2"
-"""str: Version of the companion app this package mimics in the LAN handshake."""
+"""str: ``clientVersionName`` of the companion app this package mimics."""
+
+APP_VERSION_CODE: Final[int] = 1030
+"""int: ``clientVersionCode`` of the analysed build."""
+
+DEVICE_TYPE_ANDROID_MOBILE: Final[int] = 1
+"""int: ``deviceType`` value ``ANDROID_MOBILE`` of the LAN handshake."""
 
 LAN_CHECKSUM_OFFSET: Final[int] = 2
 """int: Value added to the frame length field to obtain the LAN checksum byte."""

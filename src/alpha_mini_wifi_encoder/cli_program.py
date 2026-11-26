@@ -432,6 +432,14 @@ def run_command(  # noqa: PLR0913 - one parameter per CLI option
             console=console,
         )
     )
+    if isinstance(transport, LanTransport) and transport.handshake_result is not None:
+        hello = transport.handshake_result
+        console.print(
+            f"[dim]robot: software={escape(hello.robot_soft_version_name)} "
+            f"firmware={escape(hello.android_firmware_version)} "
+            f"interface={hello.bt_interface_version} errorCode={hello.error_code} "
+            f"sessionId={escape(hello.session_id)}[/dim]"
+        )
     for label, result in outcomes:
         colour = "green" if result.is_success else "red"
         console.print(

@@ -7,7 +7,13 @@ from click.testing import CliRunner, Result
 from alpha_mini_wifi_encoder import cli_program
 from alpha_mini_wifi_encoder.ble_transport import BleTransport
 from alpha_mini_wifi_encoder.cli import main
-from alpha_mini_wifi_encoder.codemao import CodeMaoCodec, handshake_request
+from alpha_mini_wifi_encoder.codemao import (
+    CodeMaoCodec,
+    LanHandshakeResult,
+    handshake_request,
+    parse_lan_handshake_result,
+)
+from alpha_mini_wifi_encoder.codemao_messages import LanHandshakeResponse
 from alpha_mini_wifi_encoder.constants import CodeMaoCommand
 from alpha_mini_wifi_encoder.lan import LanTransport
 from alpha_mini_wifi_encoder.lan_discovery import LanRobot, ZeroconfLanScanner
@@ -210,6 +216,46 @@ class TestLanEncode:
         document = json.loads(invoke("encode", *HANDSHAKE, "--output", "json").output)
         assert document["via"] == "ble"
         assert document["chunks"]
+
+    def test_run_via_lan_prints_the_robot_handshake(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        inner = ScriptedTransport()
+
+        class FakeLan(LanTransport):
+            def __init__(self) -> None:
+                super().__init__("h", 1)
+                self._result = parse_lan_handshake_result(
+                    LanHandshakeResponse(
+                        isSuccess=True,
+                        robotSoftVersionName="2.0.1",
+                        androidFirmwareVersion="fw-9",
+                        btInterfaceVersion=3,
+                        sessionId="rs",
+                    ).SerializeToString()
+                )
+
+            @property
+            def handshake_result(self) -> LanHandshakeResult | None:
+                return self._result
+
+            async def connect(self) -> None:
+                await inner.connect()
+
+            async def close(self) -> None:
+                await inner.close()
+
+            async def send(self, frame: bytes) -> None:
+                await inner.send(frame)
+
+            async def receive(self) -> bytes:
+                return await inner.receive()
+
+        monkeypatch.setattr(cli_program, "create_lan_transport", lambda _host, _port: FakeLan())
+        result = invoke("run", *HANDSHAKE, "--via", "lan", "--host", "h", "--port", "7000", "-y")
+        assert result.exit_code == 0, result.output
+        assert "software=2.0.1" in result.output
+        assert "firmware=fw-9" in result.output
+        assert "sessionId=rs" in result.output
+
 
 
 def test_default_factories() -> None:

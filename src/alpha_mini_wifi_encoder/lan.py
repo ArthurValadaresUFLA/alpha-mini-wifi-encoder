@@ -19,10 +19,17 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self
 
-from alpha_mini_wifi_encoder.codemao import CodeMaoCodec, CodeMaoRequest, parse_result
-from alpha_mini_wifi_encoder.codemao_messages import LanHandshakeRequest, LanHandshakeResponse
+from alpha_mini_wifi_encoder.codemao import (
+    CodeMaoCodec,
+    CodeMaoRequest,
+    LanHandshakeResult,
+    parse_lan_handshake_result,
+)
+from alpha_mini_wifi_encoder.codemao_messages import LanHandshakeRequest
 from alpha_mini_wifi_encoder.constants import (
+    APP_VERSION_CODE,
     APP_VERSION_NAME,
+    DEVICE_TYPE_ANDROID_MOBILE,
     LAN_HANDSHAKE_REQUEST_COMMAND,
     LAN_HANDSHAKE_RESPONSE_COMMAND,
     LAN_HANDSHAKE_TIMEOUT_SECONDS,
@@ -59,17 +66,21 @@ class LanIdentity:
 
     Attributes:
         uuid (str): Client identifier; stable per installation in the app.
-        app_version (str): Version string of the companion app being mimicked.
-        locale (str): Locale tag, e.g. ``"en"``.
-        device_type (str): Client platform label (assumed ``"android"``).
         session_id (str): Identifier of this connection attempt.
+        client_lan (str): Client language tag, e.g. ``"en"`` (``clientLan``).
+        client_version_name (str): Version name of the companion app being mimicked.
+        client_version_code (int): Version code of that app build (1030).
+        device_country (str): Client country code (``deviceCountry``); a placeholder default.
+        device_type (int): ``deviceType``; ``1`` is ``ANDROID_MOBILE``.
     """
 
     uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
-    app_version: str = APP_VERSION_NAME
-    locale: str = "en"
-    device_type: str = "android"
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    client_lan: str = "en"
+    client_version_name: str = APP_VERSION_NAME
+    client_version_code: int = APP_VERSION_CODE
+    device_country: str = "US"
+    device_type: int = DEVICE_TYPE_ANDROID_MOBILE
 
 
 class LanTransport:
@@ -116,6 +127,7 @@ class LanTransport:
         self._writer: asyncio.StreamWriter | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._last_write = 0.0
+        self._handshake_result: LanHandshakeResult | None = None
 
     @property
     def codec(self) -> CodeMaoCodec:
@@ -245,30 +257,30 @@ class LanTransport:
         """
         identity = self._identity
         body = LanHandshakeRequest(
-            uuid=identity.uuid,
-            appVersion=identity.app_version,
-            locale=identity.locale,
+            clientLan=identity.client_lan,
+            clientVersionName=identity.client_version_name,
+            clientVersionCode=identity.client_version_code,
+            deviceCountry=identity.device_country,
             deviceType=identity.device_type,
+            uuid=identity.uuid,
             sessionId=identity.session_id,
         ).SerializeToString(deterministic=True)
         request = CodeMaoRequest(LAN_HANDSHAKE_REQUEST_COMMAND, body)
         await self.send(self._codec.encode(request, _HANDSHAKE_SERIAL))
         try:
             async with asyncio.timeout(self._handshake_timeout):
-                reply = self._codec.decode(await self.receive())
-            result = parse_result(reply.body, LanHandshakeResponse)
+                reply = CodeMaoCodec.decode(await self.receive())
+            result = parse_lan_handshake_result(reply.body)
         except TimeoutError as error:
             msg = f"no handshake response within {self._handshake_timeout:g}s"
             raise LanError(msg) from error
         except ProtocolError as error:
             msg = f"malformed handshake response: {error}"
             raise LanError(msg) from error
-        if reply.command_id != LAN_HANDSHAKE_RESPONSE_COMMAND or not result.is_success:
-            msg = (
-                f"handshake refused (commandId={reply.command_id}, "
-                f"resultCode={result.result_code}, message={result.message!r})"
-            )
+        if reply.command_id != LAN_HANDSHAKE_RESPONSE_COMMAND:
+            msg = f"unexpected handshake response commandId={reply.command_id}"
             raise LanError(msg)
+        self._handshake_result = result
 
     async def _read_loop(self, reader: asyncio.StreamReader) -> None:
         """Feed received bytes to the frame decoder until the link fails.

@@ -1,9 +1,10 @@
 """Protobuf messages of the CodeMao programming skill and of the LAN handshake.
 
-Field *names* and the declaration order come from the analysis report. Field *numbers* are
-confirmed only for ``HandShakeRequest`` (1, 2, 3) and ``ControlRunningProgramRequest``
-(``isStart``); every response layout and the LAN handshake layout assume consecutive numbers
-in the order the report lists the fields. Nothing here was validated on hardware.
+Field numbers are confirmed for ``HandShakeRequest`` (1, 2, 3), ``ControlRunningProgramRequest``
+(``isStart``) and for the LAN handshake pair (``BluetoothHandShakeRequest`` with 7 fields and
+``BluetoothShakeResponse`` with 9, recovered from ``doc/lan_api.md``). The CodeMao *response*
+layouts assume consecutive numbers in the order the report lists the fields. Nothing here was
+validated on hardware.
 
 The module exports the runtime message classes :data:`HandShakeRequest`,
 :data:`HandShakeResponse`, :data:`ControlRunningProgramRequest`,
@@ -29,6 +30,31 @@ if TYPE_CHECKING:
 
 _PACKAGE = "alphamini.codemao"
 """str: Protobuf package name prefixing every message in the descriptor pool."""
+
+
+_LAN_REQUEST_FIELDS: tuple[tuple[str, int], ...] = (
+    ("clientLan", Field.TYPE_STRING),
+    ("clientVersionName", Field.TYPE_STRING),
+    ("clientVersionCode", Field.TYPE_INT32),
+    ("deviceCountry", Field.TYPE_STRING),
+    ("deviceType", Field.TYPE_INT32),
+    ("uuid", Field.TYPE_STRING),
+    ("sessionId", Field.TYPE_STRING),
+)
+"""tuple[tuple[str, int], ...]: ``BluetoothHandShakeRequest`` fields 1..7 (from the app)."""
+
+_LAN_RESPONSE_FIELDS: tuple[tuple[str, int], ...] = (
+    ("isSuccess", Field.TYPE_BOOL),
+    ("resultCode", Field.TYPE_INT32),
+    ("sysLan", Field.TYPE_STRING),
+    ("sysCountry", Field.TYPE_STRING),
+    ("robotSoftVersionName", Field.TYPE_STRING),
+    ("btInterfaceVersion", Field.TYPE_INT32),
+    ("androidFirmwareVersion", Field.TYPE_STRING),
+    ("errorCode", Field.TYPE_INT32),
+    ("sessionId", Field.TYPE_STRING),
+)
+"""tuple[tuple[str, int], ...]: ``BluetoothShakeResponse`` fields 1..9 (from the app)."""
 
 
 def _add_result_fields(message: descriptor_pb2.DescriptorProto) -> int:
@@ -83,12 +109,13 @@ def _build_file() -> descriptor_pb2.FileDescriptorProto:
 
     lan_request = proto.message_type.add()
     lan_request.name = "LanHandshakeRequest"
-    for number, name in enumerate(("uuid", "appVersion", "locale", "deviceType", "sessionId"), 1):
-        add_field(lan_request, name, number, Field.TYPE_STRING)
+    for number, (name, kind) in enumerate(_LAN_REQUEST_FIELDS, 1):
+        add_field(lan_request, name, number, kind)
 
     lan_response = proto.message_type.add()
     lan_response.name = "LanHandshakeResponse"
-    _add_result_fields(lan_response)
+    for number, (name, kind) in enumerate(_LAN_RESPONSE_FIELDS, 1):
+        add_field(lan_response, name, number, kind)
     return proto
 
 
@@ -127,7 +154,7 @@ RevertOriginResponse: type[Message] = _message_class("RevertOriginResponse")
 """type[Message]: Result triple ``{isSuccess, resultCode, returnMsg}``."""
 
 LanHandshakeRequest: type[Message] = _message_class("LanHandshakeRequest")
-"""type[Message]: ``{uuid, appVersion, locale, deviceType, sessionId}`` (all strings)."""
+"""type[Message]: ``BluetoothHandShakeRequest``, seven fields (``clientLan`` ... ``sessionId``)."""
 
 LanHandshakeResponse: type[Message] = _message_class("LanHandshakeResponse")
-"""type[Message]: Result triple ``{isSuccess, resultCode, returnMsg}``."""
+"""type[Message]: ``BluetoothShakeResponse``, nine fields from ``isSuccess`` to ``sessionId``."""

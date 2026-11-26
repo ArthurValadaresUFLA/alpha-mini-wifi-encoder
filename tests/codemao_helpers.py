@@ -49,12 +49,18 @@ def lan_frame_of(content: bytes) -> bytes:
     return LanFrameLayer().encode(content)
 
 
-def lan_ok(*, success: bool = True, code: int = 0) -> bytes:
+def lan_ok(*, success: bool = True, code: int = 0, error_code: int = 0, version: int = 3) -> bytes:
     """Build a LAN handshake response frame (commandId 1000)."""
     body = LanHandshakeResponse(
-        isSuccess=success, resultCode=code, returnMsg=""
+        isSuccess=success,
+        resultCode=code,
+        errorCode=error_code,
+        robotSoftVersionName="2.0.1",
+        androidFirmwareVersion="fw-9",
+        btInterfaceVersion=version,
+        sessionId="robot-session",
     ).SerializeToString()
-    return frame_of(envelope(1000, body))
+    return lan_frame_of(envelope(1000, body))
 
 
 def result_body(message_type: type[Message], *, success: bool = True, code: int = 0) -> bytes:

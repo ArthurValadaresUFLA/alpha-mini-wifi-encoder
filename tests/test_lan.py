@@ -79,7 +79,8 @@ def test_identity_defaults_are_fresh_and_overridable() -> None:
     first, second = LanIdentity(), LanIdentity()
     assert first.uuid != second.uuid
     assert first.session_id != second.session_id
-    assert first.app_version == "1.3.2"
+    assert (first.client_version_name, first.client_version_code) == ("1.3.2", 1030)
+    assert first.device_type == 1
     assert LanIdentity(uuid="u").uuid == "u"
 
 
@@ -88,7 +89,7 @@ def test_handshake_then_programming_session() -> None:
 
     async def scenario() -> list[bool]:
         async with serve(robot(log=log)) as port:
-            identity = LanIdentity(uuid="U", session_id="S", locale="pt-BR")
+            identity = LanIdentity(uuid="U", session_id="S", client_lan="pt", device_country="BR")
             transport = LanTransport("127.0.0.1", port, identity=identity)
             async with CodeMaoSession(transport) as session:
                 handshake = await session.handshake("1", "n", 2)
@@ -99,21 +100,24 @@ def test_handshake_then_programming_session() -> None:
     hello = log[0]
     assert (hello.command_id, hello.send_serial) == (0, 0)
     body = LanHandshakeRequest.FromString(hello.body)
-    assert (body.uuid, body.sessionId, body.locale, body.appVersion) == (  # type: ignore[attr-defined]
-        "U",
-        "S",
-        "pt-BR",
-        "1.3.2",
+    fields = (
+        body.clientLan,  # type: ignore[attr-defined]
+        body.clientVersionName,  # type: ignore[attr-defined]
+        body.clientVersionCode,  # type: ignore[attr-defined]
+        body.deviceCountry,  # type: ignore[attr-defined]
+        body.deviceType,  # type: ignore[attr-defined]
+        body.uuid,  # type: ignore[attr-defined]
+        body.sessionId,  # type: ignore[attr-defined]
     )
+    assert fields == ("pt", "1.3.2", 1030, "BR", 1, "U", "S")
     assert [r.command_id for r in log[1:]] == [29, 33]
 
 
 @pytest.mark.parametrize(
     ("handshake", "message"),
     [
-        (lan_ok(success=False, code=9), "refused.*resultCode=9"),
-        (frame_of(envelope(7, b"")), "refused.*commandId=7"),
-        (frame_of(envelope(1000, b"\xff\xff")), "malformed handshake"),
+        (lan_frame_of(envelope(7, b"")), "unexpected handshake response commandId=7"),
+        (lan_frame_of(envelope(1000, b"\xff\xff")), "malformed handshake"),
     ],
 )
 def test_handshake_refusals(handshake: bytes, message: str) -> None:
@@ -335,3 +339,20 @@ def test_client_frames_carry_the_lan_checksum() -> None:
     assert handshake[length - 1] == (length + 2) & 0xFF
     assert handshake[length] == 0xED
     assert heartbeat.startswith(bytes.fromhex("fbbf0100070109ed"))  # pong 0x01, checksum 9
+
+
+def test_handshake_result_is_exposed() -> None:
+    async def scenario() -> tuple[int, str, str]:
+        async with serve(robot()) as port:
+            transport = LanTransport("127.0.0.1", port, writer_idle=10)
+            assert (initial := transport.handshake_result) is None, initial
+            async with transport:
+                result = transport.handshake_result
+                assert result is not None
+                return (
+                    result.bt_interface_version,
+                    result.robot_soft_version_name,
+                    result.session_id,
+                )
+
+    assert asyncio.run(scenario()) == (3, "2.0.1", "robot-session")
