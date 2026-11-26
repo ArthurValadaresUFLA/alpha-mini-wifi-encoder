@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import click
@@ -51,21 +52,40 @@ from alpha_mini_wifi_encoder.session import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-_ACTIONS: dict[str, Callable[[CodeMaoSession], Awaitable[CommandResult]]] = {
-    "start": CodeMaoSession.start_program,
-    "stop": CodeMaoSession.stop_program,
-    "revert-origin": CodeMaoSession.revert_origin,
-}
-"""dict[str, Callable]: Registry of the actions ``program run`` can perform after the handshake."""
 
-_ENCODE_REQUESTS: dict[str, Callable[[], CodeMaoRequest]] = {
-    "start": lambda: control_program_request(start=True),
-    "stop": lambda: control_program_request(start=False),
-    "revert-origin": revert_origin_request,
-}
-"""dict[str, Callable]: Builders of the action requests shown by ``program encode``."""
+@dataclass(frozen=True, slots=True)
+class ProgramAction:
+    """One action of ``program run`` / ``program encode``, defined in a single place.
 
-DEFAULT_LAN_PORT_HINT = "port advertised by mDNS (see lan-scan)"
+    Attributes:
+        name (str): Command-line name of the action.
+        builder (Callable[[], CodeMaoRequest]): Builds the request shown by ``program encode``.
+        runner (Callable[[CodeMaoSession], Awaitable[CommandResult]]): Performs the action.
+    """
+
+    name: str
+    builder: Callable[[], CodeMaoRequest]
+    runner: Callable[[CodeMaoSession], Awaitable[CommandResult]]
+
+
+PROGRAM_ACTIONS: dict[str, ProgramAction] = {
+    action.name: action
+    for action in (
+        ProgramAction(
+            "start", lambda: control_program_request(start=True), CodeMaoSession.start_program
+        ),
+        ProgramAction(
+            "stop", lambda: control_program_request(start=False), CodeMaoSession.stop_program
+        ),
+        ProgramAction("revert-origin", revert_origin_request, CodeMaoSession.revert_origin),
+    )
+}
+"""dict[str, ProgramAction]: Registry of the actions that follow the handshake."""
+
+DEFAULT_LAN_PORT_HINT = (
+    "TCP port advertised by mDNS; without it pass --port explicitly "
+    "(7000 is only the one value observed on hardware, not confirmed)"
+)
 """str: Help text for ``--port``; the port is never assumed."""
 
 
@@ -116,7 +136,7 @@ def _encode_request(
     """Build the request shown by ``program encode``.
 
     Args:
-        action (str): ``"handshake"`` or a key of ``_ENCODE_REQUESTS``.
+        action (str): ``"handshake"`` or a key of ``PROGRAM_ACTIONS``.
         user_id (str): Handshake user id.
         nickname (str): Handshake nickname.
         programme_version (int): Handshake programme version.
@@ -126,7 +146,7 @@ def _encode_request(
     """
     if action == "handshake":
         return handshake_request(user_id, nickname, programme_version)
-    return _ENCODE_REQUESTS[action]()
+    return PROGRAM_ACTIONS[action].builder()
 
 
 def _describe_event(reply: CodeMaoReply) -> str:
@@ -164,7 +184,7 @@ async def _run_session(  # noqa: PLR0913 - mirrors the command options
         user_id (str): Handshake user id.
         nickname (str): Handshake nickname.
         programme_version (int): Handshake programme version.
-        actions (tuple[str, ...]): Keys of ``_ACTIONS`` to perform after the handshake.
+        actions (tuple[str, ...]): Keys of ``PROGRAM_ACTIONS`` to perform after the handshake.
         hold (float): Seconds to keep the session open and print events afterwards.
         reply_timeout (float): Seconds to wait for each reply.
         console (Console): Console receiving unsolicited events.
@@ -183,7 +203,7 @@ async def _run_session(  # noqa: PLR0913 - mirrors the command options
         if not handshake.is_success:
             return outcomes
         for action in actions:
-            result = await _ACTIONS[action](session)
+            result = await PROGRAM_ACTIONS[action].runner(session)
             outcomes.append((action, result))
             if not result.is_success:
                 return outcomes
@@ -232,10 +252,11 @@ def _identity_options(function: Callable[..., None]) -> Callable[..., None]:
 @_identity_options
 @click.option(
     "--action",
-    type=click.Choice(["handshake", *_ENCODE_REQUESTS]),
+    type=click.Choice(["handshake", *PROGRAM_ACTIONS]),
     default="handshake",
     show_default=True,
 )
+@click.option("--via", type=click.Choice(["ble", "lan"]), default="ble", show_default=True)
 @click.option("--send-serial", type=click.IntRange(min=0), default=1, show_default=True)
 @click.option("--random-id", type=click.IntRange(0, MAX_RANDOM_ID), default=0x1234)
 @click.option("--output", "output_format", type=click.Choice(["pretty", "json"]), default="pretty")
@@ -245,6 +266,7 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
     nickname: str,
     programme_version: int,
     action: str,
+    via: str,
     send_serial: int,
     random_id: int,
     output_format: str,
@@ -256,8 +278,9 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
         nickname (str): Handshake nickname.
         programme_version (int): Handshake programme version.
         action (str): Command to encode.
+        via (str): Channel whose framing to show: ``"ble"`` (GATT writes) or ``"lan"`` (TCP).
         send_serial (int): Header ``sendSerial`` value.
-        random_id (int): Chunk random id for the BLE writes.
+        random_id (int): Chunk random id for the BLE writes (ignored with ``--via lan``).
         output_format (str): ``"pretty"`` or ``"json"``.
 
     Returns:
@@ -266,15 +289,18 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
     request = _encode_request(
         action, user_id=user_id, nickname=nickname, programme_version=programme_version
     )
-    frame = CodeMaoCodec.encode(request, send_serial)
-    chunks = TrailerChunker(FixedRandomId(random_id)).split(frame)
+    codec = CodeMaoCodec.for_lan() if via == "lan" else CodeMaoCodec()
+    frame = codec.encode(request, send_serial)
+    # The randomId/serialNo trailer exists only on GATT writes; a TCP stream has no chunks.
+    chunks = TrailerChunker(FixedRandomId(random_id)).split(frame) if via == "ble" else []
     console = Console()
     if output_format == "json":
         document = {
             "commandId": request.command_id,
             "body": request.body.hex(),
             "frame": frame.hex(),
-            "chunks": [chunk.hex() for chunk in chunks],
+            "via": via,
+            "chunks": [chunk.hex() for chunk in chunks] if via == "ble" else None,
         }
         console.print_json(json.dumps(document))
         return
@@ -287,10 +313,15 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
         )
     )
     console.print(Panel(frame.hex(" "), title=f"Frame ({len(frame)} bytes)", expand=False))
-    table = Table("#", "Bytes", "GATT write value", title="GATT writes (BLE only, <= 20 B each)")
-    for serial, chunk in enumerate(chunks, 1):
-        table.add_row(str(serial), str(len(chunk)), chunk.hex(" "))
-    console.print(table)
+    if via == "ble":
+        table = Table(
+            "#", "Bytes", "GATT write value", title="GATT writes (BLE only, <= 20 B each)"
+        )
+        for serial, chunk in enumerate(chunks, 1):
+            table.add_row(str(serial), str(len(chunk)), chunk.hex(" "))
+        console.print(table)
+    else:
+        console.print("[dim]LAN: the frame above is written as-is to the TCP stream.[/dim]")
     console.print("[dim]Offline output only - nothing was sent to any device.[/dim]")
 
 
@@ -303,7 +334,7 @@ def encode_command(  # noqa: PLR0913 - one parameter per CLI option
 @click.option(
     "--do",
     "actions",
-    type=click.Choice(sorted(_ACTIONS)),
+    type=click.Choice(sorted(PROGRAM_ACTIONS)),
     multiple=True,
     help="Action after the handshake; repeatable, executed in the given order.",
 )

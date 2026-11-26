@@ -45,6 +45,15 @@ DEFAULT_REPLY_TIMEOUT_SECONDS = 10.0
 class FrameTransport(Protocol):
     """Strategy moving whole frames between the client and the robot."""
 
+    @property
+    def codec(self) -> CodeMaoCodec:
+        """Codec matching the channel's framing (BLE tail or LAN checksum).
+
+        Returns:
+            CodeMaoCodec: The codec the session must use to encode requests.
+        """
+        ...
+
     async def connect(self) -> None:
         """Open the channel (and run any channel-level handshake).
 
@@ -151,7 +160,7 @@ class CodeMaoSession:
             ChannelKickedError: If the robot announces that another client took the channel.
         """
         serial = next(self._serials)
-        await self._transport.send(self._codec.encode(request, serial))
+        await self._transport.send(self._transport.codec.encode(request, serial))
         try:
             async with asyncio.timeout(self._reply_timeout):
                 while True:
@@ -233,7 +242,7 @@ class CodeMaoSession:
         Raises:
             ChannelKickedError: If the robot announces that another client took the channel.
         """
-        reply = self._codec.decode(await self._transport.receive())
+        reply = CodeMaoCodec.decode(await self._transport.receive())
         if reply.command_id == LAN_KICKED_COMMAND:
             msg = "the robot reports that another client took over the channel"
             raise ChannelKickedError(msg)

@@ -122,3 +122,6 @@ LAN_MDNS_SERVICE_TYPE: Final[str] = "DEDU_mini_robot_control._tcp.local."
 
 APP_VERSION_NAME: Final[str] = "1.3.2"
 """str: Version of the companion app this package mimics in the LAN handshake."""
+
+LAN_CHECKSUM_OFFSET: Final[int] = 2
+"""int: Value added to the frame length field to obtain the LAN checksum byte."""

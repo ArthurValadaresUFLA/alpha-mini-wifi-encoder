@@ -11,7 +11,7 @@ from alpha_mini_wifi_encoder.errors import ChannelKickedError, LanError
 from alpha_mini_wifi_encoder.frames import FrameStreamDecoder
 from alpha_mini_wifi_encoder.lan import LanIdentity, LanTransport
 from alpha_mini_wifi_encoder.session import CodeMaoSession
-from tests.codemao_helpers import default_responder, envelope, frame_of, lan_ok
+from tests.codemao_helpers import default_responder, envelope, frame_of, lan_frame_of, lan_ok
 
 Handler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 
@@ -67,7 +67,7 @@ def robot(
                 if log is not None:
                     log.append(request)
                 for content in responder(request):
-                    writer.write(frame_of(content))
+                    writer.write(lan_frame_of(content))
                 await writer.drain()
         except (ConnectionError, asyncio.IncompleteReadError):
             return
@@ -203,7 +203,7 @@ def test_heartbeats_are_sent_when_idle_and_received_ones_are_filtered() -> None:
 
 def test_kicked_surfaces_through_the_session() -> None:
     async def scenario() -> None:
-        kicked = frame_of(envelope(LAN_KICKED_COMMAND))
+        kicked = lan_frame_of(envelope(LAN_KICKED_COMMAND))
         async with serve(robot(extra=kicked)) as port:
             transport = LanTransport("127.0.0.1", port, writer_idle=10)
             async with CodeMaoSession(transport, reply_timeout=1) as session:
@@ -299,5 +299,14 @@ def test_read_error_is_reported() -> None:
         )
         with pytest.raises(LanError, match="LAN read failed"):
             await transport.connect()
+
+    asyncio.run(scenario())
+
+
+def test_close_without_connection_is_a_no_op() -> None:
+    async def scenario() -> None:
+        transport = LanTransport("127.0.0.1", 1)
+        await transport.close()
+        await transport.close()
 
     asyncio.run(scenario())

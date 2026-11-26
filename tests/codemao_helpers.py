@@ -13,7 +13,7 @@ from alpha_mini_wifi_encoder.codemao_messages import (
     RevertOriginResponse,
 )
 from alpha_mini_wifi_encoder.constants import CodeMaoCommand
-from alpha_mini_wifi_encoder.layers import FrameLayer, unpack_frame
+from alpha_mini_wifi_encoder.layers import FrameLayer, LanFrameLayer, unpack_frame
 from alpha_mini_wifi_encoder.protobuf_messages import EnvelopeMessage, MessageHeader
 
 if TYPE_CHECKING:
@@ -42,6 +42,11 @@ def envelope(
 def frame_of(content: bytes) -> bytes:
     """Wrap ``content`` in a ``MiniBleProto`` frame."""
     return FrameLayer().encode(content)
+
+
+def lan_frame_of(content: bytes) -> bytes:
+    """Wrap ``content`` in a LAN frame (checksum before ``ED``)."""
+    return LanFrameLayer().encode(content)
 
 
 def lan_ok(*, success: bool = True, code: int = 0) -> bytes:
@@ -89,6 +94,7 @@ class ScriptedTransport:
         self,
         responder: Callable[[CodeMaoReply], list[bytes]] | None = None,
     ) -> None:
+        self.codec = CodeMaoCodec()
         self.responder = responder or default_responder()
         self.sent: list[CodeMaoReply] = []
         self.inbox: asyncio.Queue[bytes | Exception] = asyncio.Queue()

@@ -107,7 +107,7 @@ def test_session_over_fake_ble_link() -> None:
     assert not fake.connected
     writes = [data for uuid, data in fake.writes if uuid == WRITE_CHARACTERISTIC_UUID]
     assert all(len(data) <= 20 for data in writes)
-    first_frame = CodeMaoCodec.encode(handshake_request("u", "n", 1), 1)
+    first_frame = CodeMaoCodec().encode(handshake_request("u", "n", 1), 1)
     assert reassemble(tuple(writes[:2])) == first_frame[:32]
 
 

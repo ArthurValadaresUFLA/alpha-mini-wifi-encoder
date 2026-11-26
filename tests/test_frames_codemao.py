@@ -23,7 +23,7 @@ def test_handshake_golden_vector() -> None:
     assert request.command_id == CodeMaoCommand.HANDSHAKE
     assert int(request.command_id) == 29
     assert request.body == bytes.fromhex("0a016e12017518 03".replace(" ", ""))
-    frame = CodeMaoCodec.encode(request, send_serial=1)
+    frame = CodeMaoCodec().encode(request, send_serial=1)
     header = bytes.fromhex("081d10012001")
     payload = b"\x0a\x06" + header + b"\x12\x08" + request.body
     assert frame == b"\xfb\xbf\x01" + (len(payload) + 6).to_bytes(2, "big") + payload + b"\x01\xed"
@@ -37,7 +37,7 @@ def test_run_stop_and_revert_bodies() -> None:
 
 
 def test_decode_round_trip() -> None:
-    frame = CodeMaoCodec.encode(handshake_request("u", "n", 3), send_serial=9)
+    frame = CodeMaoCodec().encode(handshake_request("u", "n", 3), send_serial=9)
     reply = CodeMaoCodec.decode(unpack_frame(frame))
     assert (reply.command_id, reply.send_serial, reply.response_serial, reply.version) == (
         29,

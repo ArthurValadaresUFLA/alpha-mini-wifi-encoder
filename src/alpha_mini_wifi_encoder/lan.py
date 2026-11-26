@@ -109,12 +109,30 @@ class LanTransport:
         self._read_timeout = read_timeout
         self._writer_idle = writer_idle
         self._connection_factory = connection_factory
-        self._codec = CodeMaoCodec()
+        self._codec = CodeMaoCodec.for_lan()
         self._decoder = FrameStreamDecoder()
         self._inbox: asyncio.Queue[bytes | LanError] = asyncio.Queue()
         self._writer: asyncio.StreamWriter | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._last_write = 0.0
+
+    @property
+    def codec(self) -> CodeMaoCodec:
+        """Codec for LAN frames (checksum byte before ``ED``).
+
+        Returns:
+            CodeMaoCodec: The LAN codec.
+        """
+        return self._codec
+
+    @property
+    def handshake_result(self) -> LanHandshakeResult | None:
+        """Return the robot's handshake answer once connected.
+
+        Returns:
+            LanHandshakeResult | None: The decoded response, or ``None`` before :meth:`connect`.
+        """
+        return self._handshake_result
 
     async def connect(self) -> None:
         """Open the TCP connection, run the application handshake and start the heartbeat.

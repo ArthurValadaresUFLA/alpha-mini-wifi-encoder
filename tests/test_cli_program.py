@@ -51,7 +51,7 @@ class TestEncode:
     def test_pretty_matches_codec(self) -> None:
         result = invoke("encode", *HANDSHAKE)
         assert result.exit_code == 0, result.output
-        frame = CodeMaoCodec.encode(handshake_request("u", "n", 3), 1)
+        frame = CodeMaoCodec().encode(handshake_request("u", "n", 3), 1)
         assert "HANDSHAKE (29)" in result.output
         assert frame.hex(" ")[:20] in result.output.replace("\n", " ").replace("│", "")
         assert "nothing was sent" in result.output
@@ -72,6 +72,7 @@ class TestEncode:
         assert (document["commandId"], document["body"]) == (command, body)
         assert document["frame"].startswith("fbbf01")
         assert all(len(chunk) <= 40 for chunk in document["chunks"])
+        assert document["via"] == "ble"
 
     def test_pretty_for_empty_body(self) -> None:
         result = invoke("encode", *HANDSHAKE, "--action", "revert-origin")
@@ -185,6 +186,30 @@ class TestLanScan:
         assert result.exit_code == 0, result.output
         assert "mini-1" in result.output
         assert "9000" in result.output
+
+
+class TestLanEncode:
+    def test_encode_lan_has_checksum_and_no_gatt_chunks(self) -> None:
+        result = invoke("encode", *HANDSHAKE, "--via", "lan", "--output", "json")
+        assert result.exit_code == 0, result.output
+        document = json.loads(result.output)
+        frame = bytes.fromhex(document["frame"])
+        assert document["via"] == "lan"
+        assert document["chunks"] is None
+        assert frame[-1] == 0xED
+        assert frame[-2] == (int.from_bytes(frame[3:5], "big") + 2) & 0xFF
+        assert frame == CodeMaoCodec.for_lan().encode(handshake_request("u", "n", 3), 1)
+
+    def test_encode_lan_pretty_has_no_gatt_table(self) -> None:
+        result = invoke("encode", *HANDSHAKE, "--via", "lan")
+        assert result.exit_code == 0, result.output
+        assert "GATT" not in result.output
+        assert "TCP stream" in result.output
+
+    def test_encode_ble_json_keeps_chunks(self) -> None:
+        document = json.loads(invoke("encode", *HANDSHAKE, "--output", "json").output)
+        assert document["via"] == "ble"
+        assert document["chunks"]
 
 
 def test_default_factories() -> None:

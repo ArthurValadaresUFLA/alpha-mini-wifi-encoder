@@ -6,8 +6,10 @@ origin ``28``). :class:`CodeMaoCodec` wraps a request in the shared envelope and
 decodes received frame contents into :class:`CodeMaoReply`. The ``parse_*`` functions turn a
 reply body into :class:`CommandResult` or :class:`HandShakeResult`.
 
-The same envelope and framing are used on BLE and on the LAN channel, so this module is
-transport-agnostic.
+The same envelope is used on BLE and on the LAN channel; this module is transport-agnostic.
+Note that ``protobuf_messages.MessageHeader`` declares the BLE serials as ``int64`` while the LAN
+stack uses ``int32``: for the small values used here the varint encoding is identical, but the
+two headers are distinct protocol definitions and must not be merged silently.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from alpha_mini_wifi_encoder.codemao_messages import (
 )
 from alpha_mini_wifi_encoder.constants import CODEMAO_HEADER_VERSION, CodeMaoCommand
 from alpha_mini_wifi_encoder.errors import ProtocolError
-from alpha_mini_wifi_encoder.layers import EncodingPipeline, FrameLayer, MessageLayer
+from alpha_mini_wifi_encoder.layers import EncodingPipeline, FrameLayer, LanFrameLayer, MessageLayer
 from alpha_mini_wifi_encoder.protobuf_messages import EnvelopeMessage
 
 if TYPE_CHECKING:
@@ -143,10 +145,33 @@ def revert_origin_request() -> CodeMaoRequest:
 
 
 class CodeMaoCodec:
-    """Encode requests into frames and decode frame contents into replies."""
+    """Encode requests into frames and decode frame contents into replies.
 
-    @staticmethod
-    def encode(request: CodeMaoRequest, send_serial: int) -> bytes:
+    The envelope is shared by both channels; only the frame's closing bytes differ, so the codec
+    is parameterised by the frame layer: the BLE tail ``01 ED`` or the LAN checksum.
+    """
+
+    def __init__(self, frame_layer: FrameLayer | None = None) -> None:
+        """Create a codec.
+
+        Args:
+            frame_layer (FrameLayer | None): Frame layer closing the packets; BLE by default.
+
+        Returns:
+            None: This method does not return a value.
+        """
+        self._frame_layer = frame_layer or FrameLayer()
+
+    @classmethod
+    def for_lan(cls) -> CodeMaoCodec:
+        """Create the codec for the TCP channel, whose frames carry a checksum byte.
+
+        Returns:
+            CodeMaoCodec: A codec using :class:`~.layers.LanFrameLayer`.
+        """
+        return cls(LanFrameLayer())
+
+    def encode(self, request: CodeMaoRequest, send_serial: int) -> bytes:
         """Wrap ``request`` in the envelope and in a ``MiniBleProto`` frame.
 
         Args:
@@ -154,7 +179,7 @@ class CodeMaoCodec:
             send_serial (int): Header ``sendSerial`` for this message.
 
         Returns:
-            bytes: Complete frame, ``FB BF 01 <len BE> <envelope> 01 ED``.
+            bytes: Complete frame, ``FB BF 01 <len BE> <envelope> <tail>``.
         """
         pipeline = EncodingPipeline(
             (
@@ -163,7 +188,7 @@ class CodeMaoCodec:
                     command_id=request.command_id,
                     header_version=request.version,
                 ),
-                FrameLayer(),
+                self._frame_layer,
             ),
         )
         return pipeline.run(request.body)[-1].data
