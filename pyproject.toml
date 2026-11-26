@@ -1,6 +1,6 @@
 [project]
 name = "alpha-mini-wifi-encoder"
-version = "0.2.0"
+version = "0.3.0"
 description = "Wi-Fi provisioning encoder and programming-mode (BLE/LAN) client for the UBTECH Alpha Mini."
 readme = "README.md"
 requires-python = ">=3.12"
