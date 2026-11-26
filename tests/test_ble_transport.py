@@ -231,6 +231,7 @@ def test_heartbeat_task_ends_when_client_is_gone() -> None:
         await transport.connect()
         task = transport._heartbeat_task
         assert task is not None
+        await asyncio.sleep(0)  # let the loop reach its first sleep
         transport._client = None
         await asyncio.wait_for(task, 1)
         await transport.close()
