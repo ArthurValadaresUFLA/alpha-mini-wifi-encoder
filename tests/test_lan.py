@@ -183,7 +183,9 @@ def test_heartbeats_are_sent_when_idle_and_received_ones_are_filtered() -> None:
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         decoder = FrameStreamDecoder()
         await read_frame(reader, decoder)
-        writer.write(lan_ok() + frame_of(b"\x01") + frame_of(b"\x00") + frame_of(envelope(55)))
+        writer.write(
+            lan_ok() + lan_frame_of(b"\x00") + lan_frame_of(b"\x01") + lan_frame_of(envelope(55))
+        )
         await writer.drain()
         while True:
             seen.append(await read_frame(reader, decoder))
@@ -198,7 +200,7 @@ def test_heartbeats_are_sent_when_idle_and_received_ones_are_filtered() -> None:
 
     assert asyncio.run(scenario()) == envelope(55)
     assert seen
-    assert set(seen) == {b"\x00"}
+    assert set(seen) == {b"\x01"}  # the client answers with pong, never with ping
 
 
 def test_kicked_surfaces_through_the_session() -> None:
@@ -310,3 +312,26 @@ def test_close_without_connection_is_a_no_op() -> None:
         await transport.close()
 
     asyncio.run(scenario())
+
+
+def test_client_frames_carry_the_lan_checksum() -> None:
+    raw: list[bytes] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        raw.append(await reader.read(4096))  # the handshake, as one TCP read
+        writer.write(lan_ok())
+        await writer.drain()
+        raw.append(await reader.read(4096))  # the first heartbeat
+
+    async def scenario() -> None:
+        async with serve(handler) as port:
+            transport = LanTransport("127.0.0.1", port, writer_idle=0.02, read_timeout=5)
+            async with transport:
+                await asyncio.sleep(0.1)
+
+    asyncio.run(scenario())
+    handshake, heartbeat = raw[0], raw[1]
+    length = int.from_bytes(handshake[3:5], "big")
+    assert handshake[length - 1] == (length + 2) & 0xFF
+    assert handshake[length] == 0xED
+    assert heartbeat.startswith(bytes.fromhex("fbbf0100070109ed"))  # pong 0x01, checksum 9

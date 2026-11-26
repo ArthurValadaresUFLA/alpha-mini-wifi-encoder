@@ -1,6 +1,7 @@
 import pytest
 
 from alpha_mini_wifi_encoder.codemao import CodeMaoCodec, handshake_request
+from alpha_mini_wifi_encoder.constants import LAN_HEARTBEAT_PAYLOADS
 from alpha_mini_wifi_encoder.layers import FrameLayer, LanFrameLayer, unpack_frame
 class TestLanFraming:
     def test_checksum_is_length_plus_two(self) -> None:
@@ -27,3 +28,5 @@ class TestLanFraming:
         assert lan[-1] == 0xED
         assert lan[-2] == (int.from_bytes(lan[3:5], "big") + 2) & 0xFF
 
+    def test_heartbeat_payloads(self) -> None:
+        assert {b"\x00", b"\x01"} == LAN_HEARTBEAT_PAYLOADS

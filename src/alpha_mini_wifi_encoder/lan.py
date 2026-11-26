@@ -2,8 +2,9 @@
 
 The companion app runs this stack on Netty; here it is a small :mod:`asyncio` client. After the
 TCP connection is open, :class:`LanTransport` performs the application handshake (``commandId``
-0 answered by ``commandId`` 1000 within 15 s), then keeps the link alive: a heartbeat is written
-when the writer has been idle for 5 s, and the link is dropped after 7 s without any read.
+0 answered by ``commandId`` 1000 within 15 s), then keeps the link alive: a heartbeat (``0x01``,
+the pong to the robot's ``0x00`` ping) is written when the writer has been idle for 5 s, and the
+link is dropped after 7 s without any read. Frames carry a checksum byte (``LanFrameLayer``).
 
 Everything here is derived from static analysis: the handshake field numbers, the heartbeat
 payload and the read-timeout behaviour are assumptions that were not validated on hardware.
@@ -25,14 +26,14 @@ from alpha_mini_wifi_encoder.constants import (
     LAN_HANDSHAKE_REQUEST_COMMAND,
     LAN_HANDSHAKE_RESPONSE_COMMAND,
     LAN_HANDSHAKE_TIMEOUT_SECONDS,
+    LAN_HEARTBEAT_OUTBOUND_PONG,
     LAN_HEARTBEAT_PAYLOADS,
-    LAN_HEARTBEAT_PING,
     LAN_READ_TIMEOUT_SECONDS,
     LAN_WRITER_IDLE_SECONDS,
 )
 from alpha_mini_wifi_encoder.errors import LanError, ProtocolError
 from alpha_mini_wifi_encoder.frames import FrameStreamDecoder
-from alpha_mini_wifi_encoder.layers import FrameLayer
+from alpha_mini_wifi_encoder.layers import LanFrameLayer
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -301,7 +302,7 @@ class LanTransport:
         Returns:
             None: This method does not return a value.
         """
-        frame = FrameLayer().encode(LAN_HEARTBEAT_PING)
+        frame = LanFrameLayer().encode(LAN_HEARTBEAT_OUTBOUND_PONG)
         loop = asyncio.get_running_loop()
         while True:
             remaining = self._writer_idle - (loop.time() - self._last_write)

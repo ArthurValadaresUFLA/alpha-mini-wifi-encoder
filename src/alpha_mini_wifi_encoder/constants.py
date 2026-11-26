@@ -111,10 +111,15 @@ LAN_READ_TIMEOUT_SECONDS: Final[float] = 7.0
 LAN_WRITER_IDLE_SECONDS: Final[float] = 5.0
 """float: Seconds of write silence after which the app emits a heartbeat."""
 
-LAN_HEARTBEAT_PING: Final[bytes] = b"\x00"
-"""bytes: Heartbeat payload sent when the LAN writer is idle (assumed, see the report)."""
+LAN_HEARTBEAT_INBOUND_PING: Final[bytes] = b"\x00"
+"""bytes: Heartbeat payload the robot sends; the client discards it (``HeartbeatHandler``)."""
 
-LAN_HEARTBEAT_PAYLOADS: Final[frozenset[bytes]] = frozenset({b"\x00", b"\x01"})
+LAN_HEARTBEAT_OUTBOUND_PONG: Final[bytes] = b"\x01"
+"""bytes: Heartbeat payload the client writes whenever its writer has been idle."""
+
+LAN_HEARTBEAT_PAYLOADS: Final[frozenset[bytes]] = frozenset(
+    {LAN_HEARTBEAT_INBOUND_PING, LAN_HEARTBEAT_OUTBOUND_PONG},
+)
 """frozenset[bytes]: Frame payloads treated as heartbeats and never delivered to sessions."""
 
 LAN_MDNS_SERVICE_TYPE: Final[str] = "DEDU_mini_robot_control._tcp.local."
