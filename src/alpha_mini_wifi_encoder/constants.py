@@ -122,8 +122,18 @@ LAN_HEARTBEAT_PAYLOADS: Final[frozenset[bytes]] = frozenset(
 )
 """frozenset[bytes]: Frame payloads treated as heartbeats and never delivered to sessions."""
 
-LAN_MDNS_SERVICE_TYPE: Final[str] = "DEDU_mini_robot_control._tcp.local."
-"""str: mDNS service type constant found in the app (normalised with a ``_`` prefix on use)."""
+LAN_MDNS_META_QUERY: Final[str] = "_services._dns-sd._udp.local."
+"""str: DNS-SD meta-query; its answers are service *types*, not robots (``LanScanConfig``)."""
+
+LAN_MDNS_SERVICE_TYPES: Final[tuple[str, ...]] = (
+    LAN_MDNS_META_QUERY,
+    "_DEDU_mini_robot_control._tcp.local.",
+    "_Mini_mini_channel_server._tcp.local.",
+    "_Dedu_mini_channel_server._tcp.local.",
+)
+"""tuple[str, ...]: Canonical mDNS types browsed by default: the app's constants and the
+official SDK's (``RobotType.MINI`` and the DEDU default). The EDU/KOR variants of the SDK are not
+listed because their exact names were not recovered."""
 
 APP_VERSION_NAME: Final[str] = "1.3.2"
 """str: ``clientVersionName`` of the companion app this package mimics."""

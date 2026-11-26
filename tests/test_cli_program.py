@@ -16,8 +16,11 @@ from alpha_mini_wifi_encoder.codemao import (
 from alpha_mini_wifi_encoder.codemao_messages import LanHandshakeResponse
 from alpha_mini_wifi_encoder.constants import CodeMaoCommand
 from alpha_mini_wifi_encoder.lan import LanTransport
-from alpha_mini_wifi_encoder.lan_discovery import LanRobot, ZeroconfLanScanner
+from alpha_mini_wifi_encoder.lan_discovery import DiscoveryReport, LanRobot, ZeroconfLanScanner
+from alpha_mini_wifi_encoder.network import DetectedNetwork, NetworkDetectionError, Security
 from tests.codemao_helpers import ScriptedTransport, default_responder, envelope
+
+REAL_NETWORK_DETECTOR_FACTORY = cli_program.create_network_detector
 
 HANDSHAKE = ["--programme-version", "3", "--user-id", "u", "--nickname", "n"]
 
@@ -181,17 +184,129 @@ class TestRun:
         assert "no reply to command 29" in result.output
 
 
-class TestLanScan:
-    def test_lists_robots(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        class Scanner:
-            async def scan(self, timeout: float) -> list[LanRobot]:
-                return [LanRobot("mini-1", "10.0.0.2", 9000)]
+class FakeDetector:
+    def __init__(self, ssid: str | None) -> None:
+        self.ssid = ssid
 
-        monkeypatch.setattr(cli_program, "create_lan_scanner", Scanner)
+    def detect(self) -> DetectedNetwork:
+        if self.ssid is None:
+            msg = "no Wi-Fi"
+            raise NetworkDetectionError(msg)
+        return DetectedNetwork(self.ssid, Security.WPA2)
+
+
+@pytest.fixture(autouse=True)
+def on_demo_neuron(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never touch the real OS: the machine is on ``demo_neuron`` unless a test says otherwise."""
+    monkeypatch.setattr(cli_program, "create_network_detector", lambda: FakeDetector("demo_neuron"))
+
+
+def report(**kwargs: Any) -> DiscoveryReport:
+    values: dict[str, Any] = {
+        "types_browsed": ("_a._tcp.local.", "_b._tcp.local."),
+        "seen_by_type": {},
+        "advertised_types": (),
+        "records": (),
+        "unresolved": (),
+    }
+    return DiscoveryReport(**{**values, **kwargs})
+
+
+class Scanners:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, result: DiscoveryReport) -> None:
+        self.interfaces: list[tuple[str, ...]] = []
+        self.scans = 0
+        outer = self
+
+        class Scanner:
+            async def scan(self, timeout: float) -> DiscoveryReport:
+                outer.scans += 1
+                return result
+
+        def create(interfaces: tuple[str, ...] = ()) -> Scanner:
+            self.interfaces.append(interfaces)
+            return Scanner()
+
+        monkeypatch.setattr(cli_program, "create_lan_scanner", create)
+
+
+def found() -> DiscoveryReport:
+    robot = LanRobot(
+        "mini-1", "10.0.0.2", 7000, "_DEDU_mini_robot_control._tcp.local.", {"sn": "ABC"}
+    )
+    return report(seen_by_type={robot.service_type: 1}, records=(robot,))
+
+
+class TestLanScan:
+    def test_report_lists_counters_and_records(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, found())
         result = CliRunner().invoke(main, ["lan-scan", "--scan-timeout", "1"])
         assert result.exit_code == 0, result.output
-        assert "mini-1" in result.output
-        assert "9000" in result.output
+        for text in (
+            "types browsed: 2",
+            "records seen: 1",
+            "resolved: 1",
+            "robots: 1",
+            "mini-1",
+            "7000",
+            "sn=ABC",
+        ):
+            assert text in result.output
+
+    def test_empty_result_is_inconclusive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, report())
+        result = CliRunner().invoke(main, ["lan-scan", "--scan-timeout", "1"])
+        assert result.exit_code == 0
+        assert "robots: 0" in result.output
+        assert "do not conclude" in result.output
+
+    def test_unresolved_names_are_listed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, report(seen_by_type={"_a._tcp.local.": 1}, unresolved=("ghost",)))
+        result = CliRunner().invoke(main, ["lan-scan", "--scan-timeout", "1"])
+        assert "unresolved: ghost" in result.output
+
+    def test_wrong_network_aborts_before_scanning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scanners = Scanners(monkeypatch, found())
+        monkeypatch.setattr(cli_program, "create_network_detector", lambda: FakeDetector("other"))
+        result = CliRunner().invoke(main, ["lan-scan", "--expect-ssid", "demo_neuron"])
+        assert result.exit_code == 1
+        assert "false negative" in result.output
+        assert scanners.scans == 0
+
+    def test_expected_network_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, found())
+        result = CliRunner().invoke(
+            main, ["lan-scan", "--expect-ssid", "demo_neuron", "--scan-timeout", "1"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "ssid: demo_neuron (expected: demo_neuron)" in result.output
+
+    def test_no_wifi_only_warns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        Scanners(monkeypatch, found())
+        monkeypatch.setattr(cli_program, "create_network_detector", lambda: FakeDetector(None))
+        result = CliRunner().invoke(
+            main, ["lan-scan", "--expect-ssid", "demo_neuron", "--scan-timeout", "1"]
+        )
+        assert result.exit_code == 0, result.output
+        assert "no active Wi-Fi detected" in result.output
+
+    def test_interface_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        scanners = Scanners(monkeypatch, found())
+        result = CliRunner().invoke(
+            main,
+            [
+                "lan-scan",
+                "--interface",
+                "192.168.0.10",
+                "--interface",
+                "10.0.0.5",
+                "--scan-timeout",
+                "1",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert scanners.interfaces == [("192.168.0.10", "10.0.0.5")]
+        assert "interface: 192.168.0.10, 10.0.0.5" in result.output
 
 
 class TestLanEncode:
@@ -257,9 +372,14 @@ class TestLanEncode:
         assert "sessionId=rs" in result.output
 
 
-
 def test_default_factories() -> None:
     kwargs: dict[str, Any] = {"trailer_size": 4}
     assert isinstance(cli_program.create_ble_transport("AA", **kwargs), BleTransport)
     assert isinstance(cli_program.create_lan_transport("h", 1), LanTransport)
     assert isinstance(cli_program.create_lan_scanner(), ZeroconfLanScanner)
+
+
+def test_network_detector_factory_uses_the_os_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = FakeDetector("sentinel")
+    monkeypatch.setattr(cli_program, "create_detector", lambda: sentinel)
+    assert REAL_NETWORK_DETECTOR_FACTORY() is sentinel

@@ -3,7 +3,8 @@
 The module exports the :func:`program` click group (``encode`` and ``run``) and the
 :func:`lan_scan` command. ``program encode`` is offline. ``program run`` and ``lan-scan``
 perform I/O; they can be given test doubles through the injectable factories
-:func:`create_ble_transport`, :func:`create_lan_transport` and :func:`create_lan_scanner`.
+:func:`create_ble_transport`, :func:`create_lan_transport`, :func:`create_lan_scanner` and
+:func:`create_network_detector`.
 
 Only the three commands recovered from the app are exposed (handshake, start/stop program and
 revert origin), and :class:`~.stop_guard.StopGuard` refuses anything else. No reset, erase, unbind,
@@ -43,7 +44,8 @@ from alpha_mini_wifi_encoder.constants import (
 from alpha_mini_wifi_encoder.errors import UserAbortedError
 from alpha_mini_wifi_encoder.ids import FixedRandomId
 from alpha_mini_wifi_encoder.lan import LanTransport
-from alpha_mini_wifi_encoder.lan_discovery import LanScanner, ZeroconfLanScanner
+from alpha_mini_wifi_encoder.lan_discovery import DiscoveryReport, LanScanner, ZeroconfLanScanner
+from alpha_mini_wifi_encoder.network import NetworkDetectionError, WifiDetector, create_detector
 from alpha_mini_wifi_encoder.session import (
     DEFAULT_REPLY_TIMEOUT_SECONDS,
     CodeMaoSession,
@@ -117,13 +119,25 @@ def create_lan_transport(host: str, port: int) -> FrameTransport:
     return LanTransport(host, port)
 
 
-def create_lan_scanner() -> LanScanner:
+def create_lan_scanner(interfaces: tuple[str, ...] = ()) -> LanScanner:
     """Return the mDNS scanner.
+
+    Args:
+        interfaces (tuple[str, ...]): Local addresses to bind multicast to; empty for the default.
 
     Returns:
         LanScanner: A ``zeroconf``-backed scanner.
     """
-    return ZeroconfLanScanner()
+    return ZeroconfLanScanner(interfaces=interfaces)
+
+
+def create_network_detector() -> WifiDetector:
+    """Return the detector of the machine's current Wi-Fi network.
+
+    Returns:
+        WifiDetector: The operating-system detector.
+    """
+    return create_detector()
 
 
 # ------------------------------------------------------------------- helpers
@@ -453,22 +467,138 @@ def run_command(  # noqa: PLR0913 - one parameter per CLI option
         raise click.ClickException(msg)
 
 
-@click.command("lan-scan")
-@click.option("--scan-timeout", type=click.FloatRange(min=1), default=5.0, show_default=True)
-@handle_errors
-def lan_scan(scan_timeout: float) -> None:
-    """List robots advertised over mDNS on the local network.
+# ------------------------------------------------------------- scope guard
+def _check_scope(expect_ssid: str | None, console: Console) -> None:
+    """Abort when the machine is not on the expected Wi-Fi network.
+
+    mDNS is link-local (UDP 5353, TTL 1): scanning from another network yields a false negative,
+    so the scan is refused instead of reporting an empty result.
 
     Args:
-        scan_timeout (float): Seconds to browse.
+        expect_ssid (str | None): SSID the robot's network is expected to have.
+        console (Console): Console used for the report and warnings.
+
+    Returns:
+        None: This function does not return a value.
+
+    Raises:
+        click.ClickException: If the current SSID differs from ``expect_ssid``.
+    """
+    try:
+        current = create_network_detector().detect().ssid
+    except NetworkDetectionError as error:
+        console.print(
+            f"[yellow]warning: no active Wi-Fi detected ({escape(str(error))}); the scan is "
+            "limited to the multicast IPv4 available on the selected interface.[/yellow]"
+        )
+        return
+    expected = f" (expected: {escape(expect_ssid)})" if expect_ssid else ""
+    console.print(f"ssid: {escape(current)}{expected}")
+    if expect_ssid and current != expect_ssid:
+        msg = (
+            f"connected to {current!r}, not {expect_ssid!r}. mDNS does not cross networks, so "
+            "scanning from here would give a false negative; join the robot's network first."
+        )
+        raise click.ClickException(msg)
+
+
+def _print_report(report: DiscoveryReport, console: Console) -> None:
+    """Print the discovery counters, the diagnostic and the resolved records.
+
+    Args:
+        report (DiscoveryReport): Result of the scan.
+        console (Console): Console receiving the output.
 
     Returns:
         None: This function does not return a value.
     """
-    console = Console()
-    with console.status(f"Browsing mDNS for {scan_timeout:g}s..."):
-        robots = asyncio.run(create_lan_scanner().scan(scan_timeout))
-    table = Table("Name", "Host", "Port", title="Robots on the LAN")
-    for robot in robots:
-        table.add_row(escape(robot.name), escape(robot.host), str(robot.port))
+    by_type = ", ".join(f"{escape(t)}={n}" for t, n in sorted(report.seen_by_type.items()))
+    console.print(f"types browsed: {len(report.types_browsed)}")
+    console.print(f"types advertised by the meta-query: {len(report.advertised_types)}")
+    console.print(f"records seen: {report.records_seen}" + (f" ({by_type})" if by_type else ""))
+    console.print(f"resolved: {len(report.records)}")
+    console.print(f"robots: {len(report.robots)}")
+    console.print(f"diagnostic: {report.diagnostic}")
+    if report.unresolved:
+        console.print(f"unresolved: {escape(', '.join(report.unresolved))}")
+    table = Table("Name", "Host", "Port", "Type", "TXT", title="Resolved services")
+    for record in report.records:
+        text = ", ".join(f"{k}={v}" for k, v in record.text.items())
+        table.add_row(
+            escape(record.name),
+            escape(record.host),
+            str(record.port),
+            escape(record.service_type),
+            escape(text),
+        )
     console.print(table)
+
+
+def _scan_options(function: Callable[..., None]) -> Callable[..., None]:
+    """Attach the options shared by ``lan-scan`` and ``lan-diag``.
+
+    Args:
+        function (Callable[..., None]): Click callback to decorate.
+
+    Returns:
+        Callable[..., None]: The callback with the options attached.
+    """
+    options = [
+        click.option(
+            "--scan-timeout", type=click.FloatRange(min=1), default=12.0, show_default=True
+        ),
+        click.option(
+            "--expect-ssid", default=None, help="Abort unless connected to this Wi-Fi network."
+        ),
+        click.option(
+            "--interface",
+            "interfaces",
+            multiple=True,
+            help="Local IPv4 address to bind multicast to; repeatable.",
+        ),
+    ]
+    for option in reversed(options):
+        function = option(function)
+    return function
+
+
+def _run_scan(
+    scan_timeout: float, expect_ssid: str | None, interfaces: tuple[str, ...], console: Console
+) -> DiscoveryReport:
+    """Check the scope, then scan and print the report.
+
+    Args:
+        scan_timeout (float): Seconds to browse.
+        expect_ssid (str | None): Expected SSID, if any.
+        interfaces (tuple[str, ...]): Local addresses to bind to.
+        console (Console): Console receiving the output.
+
+    Returns:
+        DiscoveryReport: The scan result.
+    """
+    _check_scope(expect_ssid, console)
+    if interfaces:
+        console.print(f"interface: {escape(', '.join(interfaces))}")
+    with console.status(f"Browsing mDNS for {scan_timeout:g}s..."):
+        report = asyncio.run(create_lan_scanner(interfaces).scan(scan_timeout))
+    _print_report(report, console)
+    return report
+
+
+@click.command("lan-scan")
+@_scan_options
+@handle_errors
+def lan_scan(scan_timeout: float, expect_ssid: str | None, interfaces: tuple[str, ...]) -> None:
+    """List robots advertised over mDNS (all known service types, with a diagnostic).
+
+    An empty result is inconclusive: it does not prove that the robot has mDNS disabled.
+
+    Args:
+        scan_timeout (float): Seconds to browse.
+        expect_ssid (str | None): Abort unless connected to this network.
+        interfaces (tuple[str, ...]): Local addresses to bind multicast to.
+
+    Returns:
+        None: This function does not return a value.
+    """
+    _run_scan(scan_timeout, expect_ssid, interfaces, Console())
