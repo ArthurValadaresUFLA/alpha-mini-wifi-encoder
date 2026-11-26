@@ -10,9 +10,9 @@ from alpha_mini_wifi_encoder.constants import LAN_KICKED_COMMAND
 from alpha_mini_wifi_encoder.errors import ChannelKickedError, LanError
 from alpha_mini_wifi_encoder.frames import FrameStreamDecoder
 from alpha_mini_wifi_encoder.lan import LanIdentity, LanTransport
-from alpha_mini_wifi_encoder.stop_guard import StopGuard
 from alpha_mini_wifi_encoder.session import CodeMaoSession
-from tests.codemao_helpers import default_responder, envelope, frame_of, lan_frame_of, lan_ok
+from alpha_mini_wifi_encoder.stop_guard import StopGuard
+from tests.codemao_helpers import default_responder, envelope, lan_frame_of, lan_ok
 
 Handler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 

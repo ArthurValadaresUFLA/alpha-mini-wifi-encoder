@@ -1,10 +1,10 @@
 """Command-line front end for the programming (CodeMao) mode over BLE or LAN.
 
 The module exports the :func:`program` click group (``encode`` and ``run``) and the
-:func:`lan_scan` command. ``program encode`` is offline. ``program run`` and ``lan-scan``
-perform I/O; they can be given test doubles through the injectable factories
-:func:`create_ble_transport`, :func:`create_lan_transport`, :func:`create_lan_scanner` and
-:func:`create_network_detector`.
+:func:`lan_scan` and :func:`lan_diag` commands. ``program encode`` is offline. ``program run``,
+``lan-scan`` and ``lan-diag`` perform I/O; they accept test doubles through the injectable
+factories :func:`create_ble_transport`, :func:`create_lan_transport`,
+:func:`create_lan_scanner` and :func:`create_network_detector`.
 
 Only the three commands recovered from the app are exposed (handshake, start/stop program and
 revert origin), and :class:`~.stop_guard.StopGuard` refuses anything else. No reset, erase, unbind,
@@ -130,15 +130,6 @@ def create_lan_scanner(interfaces: tuple[str, ...] = ()) -> LanScanner:
         LanScanner: A ``zeroconf``-backed scanner.
     """
     return ZeroconfLanScanner(interfaces=interfaces)
-
-
-def create_network_detector() -> WifiDetector:
-    """Return the detector of the machine's current Wi-Fi network.
-
-    Returns:
-        WifiDetector: The operating-system detector.
-    """
-    return create_detector()
 
 
 # ------------------------------------------------------------------- helpers
@@ -469,6 +460,15 @@ def run_command(  # noqa: PLR0913 - one parameter per CLI option
 
 
 # ------------------------------------------------------------- scope guard
+def create_network_detector() -> WifiDetector:
+    """Return the detector of the machine's current Wi-Fi network.
+
+    Returns:
+        WifiDetector: The operating-system detector.
+    """
+    return create_detector()
+
+
 def _check_scope(expect_ssid: str | None, console: Console) -> None:
     """Abort when the machine is not on the expected Wi-Fi network.
 

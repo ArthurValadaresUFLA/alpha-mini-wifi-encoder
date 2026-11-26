@@ -394,7 +394,7 @@ class TestLanDiag:
         assert result.exit_code == 1
 
 
-class TestLanEncode:
+class TestLanEncodeAndRun:
     def test_encode_lan_has_checksum_and_no_gatt_chunks(self) -> None:
         result = invoke("encode", *HANDSHAKE, "--via", "lan", "--output", "json")
         assert result.exit_code == 0, result.output
@@ -455,6 +455,11 @@ class TestLanEncode:
         assert "software=2.0.1" in result.output
         assert "firmware=fw-9" in result.output
         assert "sessionId=rs" in result.output
+
+    def test_actions_are_defined_once(self) -> None:
+        assert set(cli_program.PROGRAM_ACTIONS) == {"start", "stop", "revert-origin"}
+        for action in cli_program.PROGRAM_ACTIONS.values():
+            assert action.builder().command_id in {28, 33}
 
 
 def test_default_factories() -> None:
